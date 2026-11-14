@@ -1,0 +1,715 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>combined_notes エディタ by gannbaru306</title>
+  <style>
+    body { font-family: sans-serif; padding: 20px; max-width: 1100px; margin: 0 auto; }
+    #drop-zone { border: 2px dashed #aaa; padding: 30px; text-align: center; color: #666; cursor: pointer; margin-bottom: 15px; }
+    #drop-zone.dragover { border-color: #00aaff; background-color: #f0f8ff; }
+    .group { margin-bottom: 15px; padding: 10px; background: #eef2f5; border-radius: 5px; }
+    .group h3 { margin: 0 0 8px; font-size: 1em; }
+    table { border-collapse: collapse; font-size: 0.9em; }
+    th, td { border: 1px solid #ccc; padding: 3px 6px; text-align: center; }
+    th { background: #dde4ea; position: sticky; top: 0; }
+    input[type=number], input[type=text] { width: 70px; }
+    #fInst { width: 110px; }
+    #results-wrap { max-height: 420px; overflow: auto; background: #fff; }
+    #log { background: #f4f4f4; border: 1px solid #ccc; padding: 10px; white-space: pre-wrap; height: 140px; overflow-y: auto; }
+    .row { margin: 6px 0; }
+    .row label { margin-right: 12px; white-space: nowrap; }
+    button { cursor: pointer; }
+    small { color: #555; }
+    .lane { box-sizing: border-box; border-bottom: 1px solid #ddd; font-size: 12px; display: flex; align-items: center; gap: 3px; padding: 0 4px; white-space: nowrap; overflow: hidden; }
+    .lane button { padding: 0 5px; font-size: 11px; }
+    .lane button.on-m { background: #e55; color: #fff; }
+    .lane button.on-s { background: #fb0; }
+    #tlWrap { display: flex; background: #fff; border: 1px solid #ccc; margin: 8px 0; }
+    #laneLabels { width: 175px; flex: none; border-right: 1px solid #ccc; }
+    #tlScroll { overflow-x: auto; flex: 1; }
+    #tlInner { position: relative; display: inline-block; vertical-align: top; }
+    #playhead { position: absolute; top: 0; left: 0; width: 2px; background: #e00; pointer-events: none; }
+    canvas#tl { display: block; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <h2>combined_notes エディタ v1.1</h2>
+  <p>MIDI変換ツールが出力した <code>combined_notes_*.txt</code> を読み込み、検索・編集して再出力します。区切りの「/」は出力時に自動で付与されるため、編集操作で削除されることはありません。</p>
+
+  <div id="drop-zone">ここをクリックするか、combined_notes_*.txt をドラッグしてください</div>
+  <input type="file" id="fileInput" accept=".txt,text/plain" style="display:none;">
+
+  <div class="group">
+    <h3>再生・タイムライン</h3>
+    <div class="row">
+      <button id="playBtn" onclick="togglePlay()">再生</button>
+      <button onclick="stopPlay()">停止</button>
+      <label><input type="checkbox" id="loop"> ループ</label>
+      <label><input type="checkbox" id="onlyMatched"> 検索に一致したノートのみ再生</label>
+      <label>音量 <input type="range" id="masterVol" min="0" max="1" step="0.01" value="0.7" oninput="setMaster(this.value)"></label>
+      <label>拡大 <input type="range" id="zoom" min="10" max="200" value="40"></label>
+    </div>
+    <div class="row">
+      <input type="range" id="seek" min="0" max="0" step="0.01" value="0" style="width:55%">
+      <span id="timeText">0:00.0 / 0:00.0</span>
+    </div>
+    <div class="row">
+      <label>開始位置(秒) <input type="number" id="seekSec" step="0.1" min="0" value="0"></label>
+      <button onclick="seek(Number($('seekSec').value))">この位置へ移動</button>
+      <button onclick="clearMix()">ミュート/ソロを全解除</button>
+    </div>
+    <div id="tlWrap">
+      <div id="laneLabels"></div>
+      <div id="tlScroll"><div id="tlInner"><canvas id="tl" width="300" height="56"></canvas><div id="playhead"></div></div></div>
+    </div>
+    <small>M: ミュート / S: ソロ（ソロ中はソロのトラックのみ再生）。タイムラインをクリックするとその位置へ移動します。音色はブラウザ上の簡易シンセによる近似で、Scratchの実際の音とは異なります。ノートの編集操作を行うと再生は一時停止します。</small>
+  </div>
+
+  <div class="group">
+    <h3>トラック一覧</h3>
+    <div class="row">
+      <label>全トラックの音量加算 <input type="number" id="allVol" value="20" step="1"></label>
+      <button onclick="allVol()">全トラックに適用</button>
+      <button onclick="addTrack()">トラック追加</button>
+      <button id="undoBtn" onclick="undo()" disabled>元に戻す</button>
+    </div>
+    <div id="trackTable"></div>
+  </div>
+
+  <div class="group">
+    <h3>検索</h3>
+    <div class="row">
+      <label>トラック <select id="fTrack"><option value="all">すべて</option></select></label>
+      <label>楽器ID <input type="text" id="fInst" placeholder="例: 1,6 (空欄=全て)"></label>
+    </div>
+    <div class="row">
+      <label>ノート <input type="number" id="nMin"> ～ <input type="number" id="nMax"></label>
+      <label>フレーム <input type="number" id="fMin"> ～ <input type="number" id="fMax"></label>
+    </div>
+    <div class="row">
+      <label>長さ(拍) <input type="number" id="bMin" step="0.01"> ～ <input type="number" id="bMax" step="0.01"></label>
+      <label>音量 <input type="number" id="vMin"> ～ <input type="number" id="vMax"></label>
+    </div>
+    <div class="row">
+      <button onclick="runSearch(true)">検索</button>
+      <button onclick="clearFilter()">条件クリア</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <h3>一括編集（検索に一致した全ノートが対象）</h3>
+    <div class="row">
+      <select id="bulkOp" onchange="updateHint()">
+        <option value="vol-add">音量を加算 (±)</option>
+        <option value="vol-set">音量を指定値にする</option>
+        <option value="vol-mul">音量を倍率で変更 (%)</option>
+        <option value="note-add">ノート番号を加算 (移調)</option>
+        <option value="note-set">ノート番号を指定値にする</option>
+        <option value="frame-add">フレームをずらす (±)</option>
+        <option value="beats-set">長さを指定値にする (拍)</option>
+        <option value="beats-mul">長さを倍率で変更 (%)</option>
+        <option value="move">指定トラックへ移動 (トラック番号)</option>
+        <option value="delete">削除</option>
+      </select>
+      <input type="number" id="bulkVal" value="20" step="any">
+      <small id="bulkHint"></small>
+      <button onclick="applyBulk()">実行</button>
+    </div>
+  </div>
+
+  <div class="group">
+    <h3>検索結果 <small id="resultInfo"></small></h3>
+    <div class="row">
+      <button onclick="changePage(-1)">前へ</button>
+      <button onclick="changePage(1)">次へ</button>
+      <small>セルを直接編集できます（ノート 0–127、フレーム 0以上の整数、長さ 0超、音量 0–100）</small>
+    </div>
+    <div id="results-wrap"><div id="results"></div></div>
+  </div>
+
+  <button id="exportBtn" onclick="exportFile()">編集結果をダウンロード</button>
+  <pre id="log">ログ出力エリア</pre>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    const logEl = $("log");
+    const log = t => { logEl.textContent += "\n" + t; logEl.scrollTop = logEl.scrollHeight; };
+    const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+
+    const INST = { 1:"ピアノ", 2:"エレピ", 3:"オルガン", 4:"ギター", 5:"エレキギター", 6:"ベース", 7:"ピチカート", 8:"チェロ", 9:"トロンボーン", 10:"クラリネット", 11:"サックス", 12:"フルート", 13:"木製フルート", 14:"バスーン", 15:"合唱", 16:"ビブラフォン", 17:"オルゴール", 18:"スチールドラム", 19:"マリンバ", 20:"シンセリード", 21:"シンセパッド" };
+    const DRUM = { 1:"スネア", 2:"バスドラム", 3:"サイドスティック", 4:"クラッシュ", 5:"オープンハット", 6:"クローズハット", 7:"タンバリン", 8:"ハンドクラップ", 9:"クラベス", 10:"ウッドブロック", 11:"カウベル", 12:"トライアングル", 13:"ボンゴ", 14:"コンガ", 15:"カバサ", 16:"ギロ", 17:"ビブラスラップ", 18:"クイーカ" };
+    const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+    const instLabel = id => id === 0 ? "ドラム" : (INST[id] || "不明");
+    const noteLabel = (inst, n) => inst === 0 ? (DRUM[n] || "不明") : NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
+
+    const PAGE = 200;
+    let tracks = [];      // [{ inst, notes: [[note, frame, beats, volume], ...] }]
+    let history = [];
+    let matched = [];     // [[trackIndex, noteRef], ...]
+    let page = 0;
+
+    // ---------- 読み込み ----------
+    const dropZone = $("drop-zone"), fileInput = $("fileInput");
+    dropZone.addEventListener("click", () => fileInput.click());
+    dropZone.addEventListener("dragover", e => { e.preventDefault(); dropZone.classList.add("dragover"); });
+    dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+    dropZone.addEventListener("drop", e => {
+      e.preventDefault(); dropZone.classList.remove("dragover");
+      if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+    });
+    fileInput.addEventListener("change", e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+
+    async function loadFile(file) {
+      try {
+        const text = await file.text();
+        const { tracks: parsed, warn } = parseText(text);
+        tracks = parsed; history = []; $("undoBtn").disabled = true; if (playing) pausePlay(); basePos = 0;
+        log(`読み込み完了: ${file.name} (トラック ${tracks.length}, ノート ${tracks.reduce((s, t) => s + t.notes.length, 0)})`);
+        if (warn > 0) log(`形式が不正な行を ${warn} 行スキップしました`);
+        refreshAll(false);
+      } catch (err) {
+        log(`【エラー】${err.message}`);
+      }
+    }
+
+    function parseText(text) {
+      const lines = text.replace(/\r/g, "").split("\n").map(s => s.trim());
+      const ids = [];
+      let i = 0;
+      while (i < lines.length && lines[i] !== "/") {
+        if (lines[i] !== "") {
+          const v = Number(lines[i]);
+          if (!Number.isInteger(v) || v < 0) throw new Error(`${i + 1}行目: 楽器番号が不正です (${lines[i]})`);
+          ids.push(v);
+        }
+        i++;
+      }
+      if (i >= lines.length) throw new Error("ヘッダの区切り「/」が見つかりません。combined_notes形式のファイルではありません。");
+      i++;
+      const result = ids.map(inst => ({ inst, notes: [] }));
+      let warn = 0;
+      for (let t = 0; t < ids.length; t++) {
+        while (i < lines.length && lines[i] !== "/") {
+          if (lines[i] !== "") {
+            const p = lines[i].split("/").map(Number);
+            if (p.length === 4 && p.every(Number.isFinite)) result[t].notes.push(p); else warn++;
+          }
+          i++;
+        }
+        i++;
+      }
+      return { tracks: result, warn };
+    }
+
+    // ---------- 出力 ----------
+    function buildText() {
+      const lines = [];
+      tracks.forEach(t => lines.push(String(t.inst)));
+      lines.push("/");
+      tracks.forEach(t => {
+        t.notes.map((n, i) => [n, i])
+          .sort((a, b) => a[0][1] - b[0][1] || a[1] - b[1])
+          .forEach(([n]) => {
+            const beats = Math.max(0.01, Number(n[2].toFixed(2)));
+            lines.push(`${Math.round(n[0])}/${Math.max(0, Math.round(n[1]))}/${beats}/${clamp(Math.round(n[3]), 0, 100)}`);
+          });
+        lines.push("/");
+      });
+      return lines.join("\n");
+    }
+
+    function exportFile() {
+      if (tracks.length === 0) { alert("ファイルを読み込んでください"); return; }
+      if (tracks.length > 15) log(`警告: トラック数が ${tracks.length} です。Scratch側では15トラックを超える分が再生されません。`);
+      const ts = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 15);
+      const blob = new Blob([buildText()], { type: "text/plain" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `edited_notes_${ts}.txt`;
+      a.click();
+      log("ダウンロードしました");
+    }
+
+    // ---------- 履歴 ----------
+    function snapshot() {
+      history.push(tracks.map(t => ({ inst: t.inst, mute: t.mute, solo: t.solo, notes: t.notes.map(n => n.slice()) })));
+      if (history.length > 20) history.shift();
+      $("undoBtn").disabled = false;
+    }
+    function undo() {
+      if (!history.length) return;
+      tracks = history.pop();
+      $("undoBtn").disabled = history.length === 0;
+      log("元に戻しました");
+      refreshAll(true);
+    }
+
+    // ---------- トラック操作 ----------
+    function refreshTracks() {
+      let h = "<table><tr><th>#</th><th>楽器ID</th><th>楽器名</th><th>音数</th><th>最大同時発音</th><th>音量加算</th><th>操作</th></tr>";
+      tracks.forEach((t, i) => {
+        const m = new Map(); let mx = 0;
+        t.notes.forEach(n => { const c = (m.get(n[1]) || 0) + 1; m.set(n[1], c); if (c > mx) mx = c; });
+        h += `<tr><td>${i + 1}</td>
+          <td><input type="number" min="0" value="${t.inst}" onchange="setInst(${i}, this.value)"></td>
+          <td>${instLabel(t.inst)}</td><td>${t.notes.length}</td><td>${mx}</td>
+          <td><input type="number" id="tv${i}" value="20" step="1"> <button onclick="trackVol(${i})">適用</button></td>
+          <td><button onclick="moveTrack(${i}, -1)">↑</button> <button onclick="moveTrack(${i}, 1)">↓</button> <button onclick="delTrack(${i})">削除</button></td></tr>`;
+      });
+      $("trackTable").innerHTML = h + "</table>";
+
+      const sel = $("fTrack"), cur = sel.value;
+      sel.innerHTML = '<option value="all">すべて</option>' +
+        tracks.map((t, i) => `<option value="${i}">${i + 1}: ${instLabel(t.inst)}</option>`).join("");
+      sel.value = [...sel.options].some(o => o.value === cur) ? cur : "all";
+    }
+
+    function setInst(i, v) {
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 0) { refreshTracks(); return; }
+      snapshot(); tracks[i].inst = n; refreshAll(true);
+    }
+    function moveTrack(i, d) {
+      const j = i + d;
+      if (j < 0 || j >= tracks.length) return;
+      snapshot(); [tracks[i], tracks[j]] = [tracks[j], tracks[i]]; refreshAll(true);
+    }
+    function delTrack(i) {
+      if (!confirm(`トラック ${i + 1} (${tracks[i].notes.length}音) を削除します。よろしいですか？`)) return;
+      snapshot(); tracks.splice(i, 1); refreshAll(true);
+    }
+    function addTrack() {
+      snapshot(); tracks.push({ inst: 1, notes: [] }); refreshAll(true);
+    }
+    function trackVol(i) {
+      const d = Number($("tv" + i).value);
+      if (!Number.isFinite(d)) return;
+      snapshot();
+      tracks[i].notes.forEach(n => n[3] = clamp(Math.round(n[3] + d), 0, 100));
+      log(`トラック ${i + 1} の音量を ${d >= 0 ? "+" : ""}${d} しました`);
+      refreshAll(true);
+    }
+    function allVol() {
+      const d = Number($("allVol").value);
+      if (!Number.isFinite(d) || tracks.length === 0) return;
+      snapshot();
+      tracks.forEach(t => t.notes.forEach(n => n[3] = clamp(Math.round(n[3] + d), 0, 100)));
+      log(`全トラックの音量を ${d >= 0 ? "+" : ""}${d} しました`);
+      refreshAll(true);
+    }
+
+    // ---------- 検索 ----------
+    function getFilter() {
+      const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+      return {
+        track: $("fTrack").value,
+        insts: $("fInst").value.split(/[,\s]+/).filter(s => s !== "").map(Number),
+        n: [num("nMin"), num("nMax")], f: [num("fMin"), num("fMax")],
+        b: [num("bMin"), num("bMax")], v: [num("vMin"), num("vMax")]
+      };
+    }
+    const inRange = (x, [lo, hi]) => (lo === null || x >= lo) && (hi === null || x <= hi);
+
+    function getMatches() {
+      const f = getFilter(), res = [];
+      tracks.forEach((t, ti) => {
+        if (f.track !== "all" && Number(f.track) !== ti) return;
+        if (f.insts.length && !f.insts.includes(t.inst)) return;
+        t.notes.forEach(n => {
+          if (inRange(n[0], f.n) && inRange(n[1], f.f) && inRange(n[2], f.b) && inRange(n[3], f.v)) res.push([ti, n]);
+        });
+      });
+      return res;
+    }
+
+    function runSearch(resetPage) {
+      if (resetPage) page = 0;
+      matched = getMatches();
+      matched.sort((a, b) => a[1][1] - b[1][1] || a[0] - b[0]);
+      renderResults();
+    }
+
+    function clearFilter() {
+      ["fInst", "nMin", "nMax", "fMin", "fMax", "bMin", "bMax", "vMin", "vMax"].forEach(id => $(id).value = "");
+      $("fTrack").value = "all";
+      runSearch(true);
+    }
+
+    function changePage(d) {
+      const maxPage = Math.max(0, Math.ceil(matched.length / PAGE) - 1);
+      page = clamp(page + d, 0, maxPage);
+      renderResults();
+    }
+
+    function renderResults() {
+      const total = matched.length;
+      const maxPage = Math.max(0, Math.ceil(total / PAGE) - 1);
+      if (page > maxPage) page = maxPage;
+      const s = page * PAGE, e = Math.min(total, s + PAGE);
+      $("resultInfo").textContent = total === 0 ? "(一致なし)" : `一致 ${total} 件 / 表示 ${s + 1}–${e}`;
+      let h = "<table><tr><th>トラック</th><th>楽器</th><th>ノート</th><th>名称</th><th>フレーム</th><th>長さ(拍)</th><th>音量</th><th></th></tr>";
+      for (let k = s; k < e; k++) {
+        const [ti, n] = matched[k], inst = tracks[ti].inst;
+        h += `<tr><td>${ti + 1}</td><td>${instLabel(inst)}</td>
+          <td><input type="number" value="${n[0]}" onchange="editCell(${k}, 0, this)"></td>
+          <td>${noteLabel(inst, n[0])}</td>
+          <td><input type="number" value="${n[1]}" onchange="editCell(${k}, 1, this)"></td>
+          <td><input type="number" step="0.01" value="${n[2]}" onchange="editCell(${k}, 2, this)"></td>
+          <td><input type="number" value="${n[3]}" onchange="editCell(${k}, 3, this)"></td>
+          <td><button onclick="delRow(${k})">削除</button></td></tr>`;
+      }
+      $("results").innerHTML = h + "</table>";
+    }
+
+    function validateCell(col, v) {
+      if (!Number.isFinite(v)) return null;
+      if (col === 0) return Number.isInteger(v) && v >= 0 && v <= 127 ? v : null;
+      if (col === 1) return Number.isInteger(v) && v >= 0 ? v : null;
+      if (col === 2) { const r = Number(v.toFixed(2)); return r > 0 ? r : null; }
+      return Number.isInteger(v) && v >= 0 && v <= 100 ? v : null;
+    }
+
+    function editCell(k, col, el) {
+      const v = validateCell(col, Number(el.value));
+      if (v === null) { log("入力値が範囲外のため変更しませんでした"); renderResults(); return; }
+      snapshot();
+      matched[k][1][col] = v;
+      refreshAll(true);
+    }
+
+    function delRow(k) {
+      const [ti, n] = matched[k];
+      const idx = tracks[ti].notes.indexOf(n);
+      if (idx < 0) return;
+      snapshot(); tracks[ti].notes.splice(idx, 1); refreshAll(true);
+    }
+
+    // ---------- 一括編集 ----------
+    const HINTS = {
+      "vol-add": "例: 20 (全音量+20、上限100)", "vol-set": "0–100", "vol-mul": "例: 120 (1.2倍)",
+      "note-add": "例: 12 (1オクターブ上)", "note-set": "0–127", "frame-add": "例: -30 (1秒早める)",
+      "beats-set": "例: 0.25", "beats-mul": "例: 50 (半分)", "move": "移動先のトラック番号 (#)", "delete": "値は不要"
+    };
+    function updateHint() { $("bulkHint").textContent = HINTS[$("bulkOp").value]; }
+
+    function applyBulk() {
+      const op = $("bulkOp").value, val = Number($("bulkVal").value);
+      const m = getMatches();
+      if (m.length === 0) { log("対象ノートがありません"); return; }
+      if (op !== "delete" && !Number.isFinite(val)) { alert("数値を入力してください"); return; }
+      if ((op === "vol-set" && (val < 0 || val > 100)) || (op === "note-set" && (val < 0 || val > 127)) ||
+          ((op === "beats-set" || op === "beats-mul") && val <= 0)) { alert("値が範囲外です"); return; }
+      let target = -1;
+      if (op === "move") {
+        target = val - 1;
+        if (!Number.isInteger(target) || target < 0 || target >= tracks.length) { alert("存在するトラック番号を指定してください"); return; }
+      }
+      if (op === "delete" && !confirm(`${m.length} 件のノートを削除します。よろしいですか？`)) return;
+
+      snapshot();
+      if (op === "delete" || op === "move") {
+        const refs = new Set(m.filter(([ti]) => op === "delete" || ti !== target).map(([, n]) => n));
+        const moved = op === "move" ? m.filter(([ti]) => ti !== target).map(([, n]) => n) : [];
+        tracks.forEach(t => { t.notes = t.notes.filter(n => !refs.has(n)); });
+        if (op === "move") tracks[target].notes.push(...moved);
+      } else {
+        m.forEach(([, n]) => {
+          switch (op) {
+            case "vol-add": n[3] = clamp(Math.round(n[3] + val), 0, 100); break;
+            case "vol-set": n[3] = Math.round(val); break;
+            case "vol-mul": n[3] = clamp(Math.round(n[3] * val / 100), 0, 100); break;
+            case "note-add": n[0] = clamp(Math.round(n[0] + val), 0, 127); break;
+            case "note-set": n[0] = Math.round(val); break;
+            case "frame-add": n[1] = Math.max(0, Math.round(n[1] + val)); break;
+            case "beats-set": n[2] = Math.max(0.01, Number(val.toFixed(2))); break;
+            case "beats-mul": n[2] = Math.max(0.01, Number((n[2] * val / 100).toFixed(2))); break;
+          }
+        });
+      }
+      log(`一括編集を実行しました: ${$("bulkOp").selectedOptions[0].textContent} (${m.length}件)`);
+      refreshAll(true);
+    }
+
+    // ---------- 再生 (Web Audio 簡易シンセ) ----------
+    const BPM = 150, FPS = 30, BEAT_SEC = 60 / BPM;   // 変換ツールと同じ換算 (1フレーム=1/30秒)
+    const LANE = 36, RULER = 20;
+    let actx = null, master = null, trackGains = [], events = [], evIdx = 0;
+    let playing = false, basePos = 0, ctxStart = 0, timer = null, raf = null;
+    let duration = 0, activeVoices = 0, noiseBuf = null, pxPerSec = 40, dragging = false;
+
+    const SYNTH = {
+      1: ["triangle", "p"], 2: ["sine", "p"], 3: ["square", "s"], 4: ["sawtooth", "p"], 5: ["sawtooth", "p"],
+      6: ["triangle", "s"], 7: ["triangle", "p"], 8: ["sawtooth", "s", 0.04], 9: ["sawtooth", "s", 0.03],
+      10: ["square", "s", 0.03], 11: ["sawtooth", "s", 0.02], 12: ["sine", "s", 0.03], 13: ["sine", "s", 0.03],
+      14: ["square", "s", 0.03], 15: ["sine", "s", 0.08], 16: ["sine", "p"], 17: ["sine", "p"], 18: ["sine", "p"],
+      19: ["sine", "p"], 20: ["sawtooth", "s"], 21: ["square", "s", 0.1]
+    };
+    // ドラム: ["t", 長さ, 開始Hz, 終了Hz] = 音程つき / ["n", 長さ, フィルタ種別, Hz] = ノイズ
+    const DRUMS = {
+      1: ["n", 0.15, "bandpass", 1800], 2: ["t", 0.25, 150, 40], 3: ["t", 0.04, 1700, 1500], 4: ["n", 1.0, "highpass", 5000],
+      5: ["n", 0.3, "highpass", 7000], 6: ["n", 0.06, "highpass", 7000], 7: ["n", 0.12, "highpass", 6000], 8: ["n", 0.15, "bandpass", 1200],
+      9: ["t", 0.05, 2500, 2500], 10: ["t", 0.08, 900, 800], 11: ["t", 0.25, 560, 540], 12: ["t", 0.6, 3000, 3000],
+      13: ["t", 0.2, 320, 200], 14: ["t", 0.25, 230, 160], 15: ["n", 0.07, "highpass", 8000], 16: ["n", 0.12, "bandpass", 3000],
+      17: ["n", 0.5, "bandpass", 2500], 18: ["t", 0.3, 400, 250]
+    };
+
+    const anySolo = () => tracks.some(t => t.solo);
+    const isAudible = t => anySolo() ? !!t.solo : !t.mute;
+    const ppsEff = () => Math.min(pxPerSec, 30000 / Math.max(duration, 1));
+    const rawPos = () => basePos + Math.max(0, actx.currentTime - ctxStart);
+    const curPos = () => playing ? Math.min(duration, rawPos()) : basePos;
+    const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+
+    function calcDuration() {
+      let d = 0;
+      tracks.forEach(t => t.notes.forEach(n => { const e = n[1] / FPS + n[2] * BEAT_SEC; if (e > d) d = e; }));
+      return d;
+    }
+
+    function getNoise() {
+      if (!noiseBuf || noiseBuf.sampleRate !== actx.sampleRate) {
+        noiseBuf = actx.createBuffer(1, Math.floor(actx.sampleRate * 1.5), actx.sampleRate);
+        const d = noiseBuf.getChannelData(0);
+        for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+      }
+      return noiseBuf;
+    }
+
+    function updateGains() {
+      if (!actx) return;
+      tracks.forEach((t, i) => { if (trackGains[i]) trackGains[i].gain.setTargetAtTime(isAudible(t) ? 1 : 0, actx.currentTime, 0.01); });
+    }
+
+    function buildEvents() {
+      const allowed = $("onlyMatched").checked ? new Set(getMatches().map(([, n]) => n)) : null;
+      events = [];
+      tracks.forEach((t, ti) => t.notes.forEach(n => {
+        if (allowed && !allowed.has(n)) return;
+        events.push({ t: n[1] / FPS, d: Math.max(0.03, n[2] * BEAT_SEC), ti, n: n[0], v: n[3] });
+      }));
+      events.sort((a, b) => a.t - b.t);
+    }
+
+    function lowerBound(arr, t) {
+      let lo = 0, hi = arr.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (arr[m].t < t - 1e-6) lo = m + 1; else hi = m; }
+      return lo;
+    }
+
+    function playTone(inst, note, when, dur, peak, out) {
+      const [wave, mode, atk = 0.01] = SYNTH[inst] || ["triangle", "s"];
+      const osc = actx.createOscillator();
+      osc.type = wave;
+      osc.frequency.value = 440 * Math.pow(2, (note - 69) / 12);
+      const g = actx.createGain();
+      g.gain.setValueAtTime(0.0001, when);
+      g.gain.linearRampToValueAtTime(peak, when + atk);
+      let end;
+      if (mode === "p") {
+        end = when + Math.min(Math.max(dur, 0.2), 1.5);
+        g.gain.exponentialRampToValueAtTime(0.0001, end);
+      } else {
+        const hold = when + Math.max(atk, dur);
+        end = hold + 0.06;
+        g.gain.setValueAtTime(peak, hold);
+        g.gain.linearRampToValueAtTime(0.0001, end);
+      }
+      if (wave === "sawtooth" || wave === "square") {
+        const f = actx.createBiquadFilter();
+        f.type = "lowpass";
+        f.frequency.value = Math.min(8000, osc.frequency.value * 6 + 800);
+        osc.connect(f); f.connect(g);
+      } else osc.connect(g);
+      g.connect(out);
+      osc.start(when); osc.stop(end + 0.02);
+      activeVoices++;
+      osc.onended = () => { activeVoices--; g.disconnect(); };
+    }
+
+    function playDrum(id, when, peak, out) {
+      const cfg = DRUMS[id] || DRUMS[3], d = cfg[1];
+      const g = actx.createGain();
+      g.gain.setValueAtTime(peak * 1.5, when);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + d);
+      let src;
+      if (cfg[0] === "t") {
+        src = actx.createOscillator();
+        src.type = "sine";
+        src.frequency.setValueAtTime(cfg[2], when);
+        src.frequency.exponentialRampToValueAtTime(Math.max(20, cfg[3]), when + d);
+        src.connect(g);
+      } else {
+        src = actx.createBufferSource();
+        src.buffer = getNoise();
+        const f = actx.createBiquadFilter();
+        f.type = cfg[2]; f.frequency.value = cfg[3];
+        src.connect(f); f.connect(g);
+      }
+      g.connect(out);
+      src.start(when); src.stop(when + d + 0.02);
+      activeVoices++;
+      src.onended = () => { activeVoices--; g.disconnect(); };
+    }
+
+    function schedule() {
+      const now = actx.currentTime, horizon = now + 0.25;
+      const aud = tracks.map(isAudible);
+      while (evIdx < events.length) {
+        const e = events[evIdx];
+        const when = ctxStart + (e.t - basePos);
+        if (when > horizon) break;
+        evIdx++;
+        if (when < now - 0.05 || !aud[e.ti] || activeVoices >= 96) continue;
+        const peak = (e.v / 100) * 0.25;
+        if (peak <= 0) continue;
+        const at = Math.max(when, now);
+        if (tracks[e.ti].inst === 0) playDrum(e.n, at, peak, trackGains[e.ti]);
+        else playTone(tracks[e.ti].inst, e.n, at, e.d, peak, trackGains[e.ti]);
+      }
+    }
+
+    function stopNodes() {
+      clearInterval(timer); timer = null;
+      cancelAnimationFrame(raf);
+      if (master) { try { master.disconnect(); } catch (e) {} master = null; }
+    }
+
+    function startPlay(from) {
+      if (!tracks.length || duration <= 0) { log("再生できるノートがありません"); return; }
+      if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+      actx.resume();
+      stopNodes();
+      master = actx.createGain();
+      master.gain.value = Number($("masterVol").value);
+      const comp = actx.createDynamicsCompressor();
+      master.connect(comp); comp.connect(actx.destination);
+      trackGains = tracks.map(t => { const g = actx.createGain(); g.gain.value = isAudible(t) ? 1 : 0; g.connect(master); return g; });
+      buildEvents();
+      basePos = clamp(from, 0, duration);
+      evIdx = lowerBound(events, basePos);
+      ctxStart = actx.currentTime + 0.05;
+      activeVoices = 0;
+      playing = true;
+      timer = setInterval(schedule, 40);
+      schedule();
+      raf = requestAnimationFrame(tick);
+      $("playBtn").textContent = "一時停止";
+    }
+
+    function pausePlay() {
+      if (playing) { basePos = curPos(); playing = false; }
+      stopNodes();
+      $("playBtn").textContent = "再生";
+      updateTransport();
+    }
+
+    function togglePlay() {
+      if (playing) pausePlay();
+      else startPlay(basePos >= duration ? 0 : basePos);
+    }
+    function stopPlay() { pausePlay(); basePos = 0; updateTransport(); }
+
+    function seek(sec) {
+      if (!Number.isFinite(sec)) return;
+      sec = clamp(sec, 0, duration);
+      if (playing) startPlay(sec); else { basePos = sec; updateTransport(); }
+    }
+
+    function tick() {
+      if (!playing) return;
+      if (rawPos() >= duration + 0.4) {
+        if ($("loop").checked) { startPlay(0); return; }
+        playing = false; stopNodes(); basePos = 0;
+        $("playBtn").textContent = "再生";
+        updateTransport();
+        return;
+      }
+      updateTransport();
+      raf = requestAnimationFrame(tick);
+    }
+
+    function updateTransport() {
+      const p = curPos();
+      $("seek").max = duration;
+      if (!dragging) $("seek").value = p;
+      $("timeText").textContent = `${fmt(p)} / ${fmt(duration)}  (フレーム ${Math.round(p * FPS)})`;
+      if (document.activeElement !== $("seekSec")) $("seekSec").value = p.toFixed(1);
+      const x = p * ppsEff();
+      $("playhead").style.left = x + "px";
+      if (playing) {
+        const w = $("tlScroll");
+        if (x < w.scrollLeft || x > w.scrollLeft + w.clientWidth - 40) w.scrollLeft = Math.max(0, x - 40);
+      }
+    }
+
+    function setMaster(v) { if (master) master.gain.value = Number(v); }
+
+    function afterMixChange() { updateGains(); drawTimeline(); }
+    function toggleMute(i) { tracks[i].mute = !tracks[i].mute; afterMixChange(); }
+    function toggleSolo(i) { tracks[i].solo = !tracks[i].solo; afterMixChange(); }
+    function clearMix() { tracks.forEach(t => { t.mute = false; t.solo = false; }); afterMixChange(); }
+
+    function drawTimeline() {
+      duration = calcDuration();
+      const pps = ppsEff();
+      const W = Math.max(300, Math.ceil(duration * pps) + 40);
+      const H = RULER + Math.max(1, tracks.length) * LANE;
+      const cv = $("tl");
+      cv.width = W; cv.height = H;
+      cv.style.width = W + "px"; cv.style.height = H + "px";
+      const c = cv.getContext("2d");
+      c.clearRect(0, 0, W, H);
+      c.fillStyle = "#f7f7f7"; c.fillRect(0, 0, W, RULER);
+      c.fillStyle = "#333"; c.font = "10px sans-serif";
+      const step = pps >= 40 ? 1 : pps >= 15 ? 5 : 10;
+      for (let s = 0; s <= duration + step; s += step) {
+        const x = Math.round(s * pps) + 0.5;
+        c.fillStyle = "#999"; c.fillRect(x, RULER - 5, 1, 5);
+        c.fillStyle = "#333"; c.fillText(fmt(s), x + 2, 11);
+      }
+      tracks.forEach((t, ti) => {
+        const y0 = RULER + ti * LANE;
+        c.fillStyle = ti % 2 ? "#f4f8fb" : "#fff"; c.fillRect(0, y0, W, LANE);
+        c.fillStyle = "#ddd"; c.fillRect(0, y0 + LANE - 1, W, 1);
+        let lo = 127, hi = 0;
+        t.notes.forEach(n => { if (n[0] < lo) lo = n[0]; if (n[0] > hi) hi = n[0]; });
+        const span = Math.max(1, hi - lo), h = LANE - 10;
+        c.fillStyle = isAudible(t) ? `hsl(${(ti * 47) % 360},70%,42%)` : "#bbb";
+        t.notes.forEach(n => {
+          const x = n[1] / FPS * pps, w = Math.max(1, n[2] * BEAT_SEC * pps);
+          const y = y0 + 4 + (1 - (n[0] - lo) / span) * h;
+          c.fillRect(x, y, w, 3);
+        });
+      });
+      $("laneLabels").innerHTML = `<div style="height:${RULER}px;border-bottom:1px solid #ddd"></div>` + tracks.map((t, i) =>
+        `<div class="lane" style="height:${LANE}px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${i + 1}: ${instLabel(t.inst)}</span>` +
+        `<button class="${t.mute ? "on-m" : ""}" onclick="toggleMute(${i})">M</button>` +
+        `<button class="${t.solo ? "on-s" : ""}" onclick="toggleSolo(${i})">S</button></div>`).join("");
+      $("playhead").style.height = H + "px";
+      if (basePos > duration) basePos = duration;
+      updateTransport();
+    }
+
+    $("tl").addEventListener("click", e => {
+      const r = $("tl").getBoundingClientRect();
+      seek((e.clientX - r.left) / ppsEff());
+    });
+    $("seek").addEventListener("input", e => {
+      if (playing) { dragging = true; return; }
+      basePos = Number(e.target.value); updateTransport();
+    });
+    $("seek").addEventListener("change", e => { dragging = false; seek(Number(e.target.value)); });
+    $("seekSec").addEventListener("change", e => seek(Number(e.target.value)));
+    $("zoom").addEventListener("input", e => { pxPerSec = Number(e.target.value); drawTimeline(); });
+
+    function refreshAll(keepPage) {
+      if (playing) pausePlay();   // データ編集時は再生を一時停止
+      refreshTracks();
+      runSearch(!keepPage);
+      drawTimeline();
+    }
+    updateHint();
+  </script>
+</body>
+</html>
