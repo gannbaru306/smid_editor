@@ -31,14 +31,47 @@
     #tlInner { position: relative; display: inline-block; vertical-align: top; }
     #playhead { position: absolute; top: 0; left: 0; width: 2px; background: #e00; pointer-events: none; }
     canvas#tl { display: block; cursor: pointer; }
+    #settings summary { cursor: pointer; font-weight: bold; }
+    #settings .row b { display: inline-block; min-width: 90px; }
   </style>
 </head>
 <body>
-  <h2>combined_notes エディタ v1.1</h2>
+  <h2>combined_notes エディタ v1.2</h2>
   <p>MIDI変換ツールが出力した <code>combined_notes_*.txt</code> を読み込み、検索・編集して再出力します。区切りの「/」は出力時に自動で付与されるため、編集操作で削除されることはありません。</p>
 
   <div id="drop-zone">ここをクリックするか、combined_notes_*.txt をドラッグしてください</div>
   <input type="file" id="fileInput" accept=".txt,text/plain" style="display:none;">
+
+  <details class="group" id="settings">
+    <summary>設定（変更は自動保存されます）</summary>
+    <div class="row"><b>表記</b>
+      <label>長さ <select data-set="lenFmt"><option value="beat">拍（数値）</option><option value="name">音符名</option><option value="both">数値と音符名</option></select></label>
+      <label>時間 <select data-set="frameUnit"><option value="frame">フレーム</option><option value="sec">秒</option><option value="bar">小節:拍</option></select></label>
+      <label>拍子 <select data-set="beatsPerBar"><option value="2">2拍/小節</option><option value="3">3拍/小節</option><option value="4">4拍/小節</option><option value="5">5拍/小節</option><option value="6">6拍/小節</option><option value="7">7拍/小節</option></select></label>
+    </div>
+    <div class="row"><b>ノート名</b>
+      <label>表示 <select data-set="noteFmt"><option value="en">英語 (C4)</option><option value="jp">日本語 (ド4)</option><option value="num">表示しない</option></select></label>
+      <label>オクターブ基準 <select data-set="octBase"><option value="4">C4 = 60</option><option value="3">C3 = 60</option></select></label>
+    </div>
+    <div class="row"><b>検索・編集</b>
+      <label>件数/ページ <select data-set="pageSize"><option value="50">50</option><option value="100">100</option><option value="200">200</option><option value="500">500</option><option value="1000">1000</option></select></label>
+      <label>並び順 <select data-set="sort"><option value="frame">フレーム順</option><option value="track">トラック順</option><option value="noteAsc">ノート番号 低→高</option><option value="noteDesc">ノート番号 高→低</option><option value="volDesc">音量 大→小</option><option value="lenDesc">長さ 長→短</option></select></label>
+      <label>音量加算の既定値 <input type="number" data-set="volDelta" step="1"></label>
+      <label><input type="checkbox" data-set="confirmAll"> 一括編集の実行前に必ず確認する</label>
+    </div>
+    <div class="row"><b>再生</b>
+      <label>速度 <select data-set="speed"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
+      <label><input type="checkbox" data-set="metronome"> メトロノーム</label>
+      <label><input type="checkbox" data-set="follow"> 再生位置に追従してスクロール</label>
+    </div>
+    <div class="row"><b>タイムライン</b>
+      <label>レーン高さ <select data-set="lane"><option value="28">小</option><option value="36">標準</option><option value="56">大</option><option value="80">特大</option></select></label>
+      <label>ノート色 <select data-set="color"><option value="track">トラック別</option><option value="vol">音量で濃淡</option></select></label>
+      <label>罫線 <select data-set="grid"><option value="none">なし</option><option value="bar">小節</option><option value="beat">拍</option></select></label>
+    </div>
+    <div class="row"><button onclick="resetSettings()">設定を初期値に戻す</button>
+      <small>1拍 = 4分音符です（変換ツールの設定: 150BPM、30フレーム=1秒、1拍=12フレーム）。長さや時間の入力欄には「付点4分」「8分3連」「3:2」のような表記も入力できます。</small></div>
+  </details>
 
   <div class="group">
     <h3>再生・タイムライン</h3>
@@ -85,10 +118,10 @@
     </div>
     <div class="row">
       <label>ノート <input type="number" id="nMin"> ～ <input type="number" id="nMax"></label>
-      <label>フレーム <input type="number" id="fMin"> ～ <input type="number" id="fMax"></label>
+      <label><span id="lblFrame">フレーム</span> <input type="text" id="fMin"> ～ <input type="text" id="fMax"></label>
     </div>
     <div class="row">
-      <label>長さ(拍) <input type="number" id="bMin" step="0.01"> ～ <input type="number" id="bMax" step="0.01"></label>
+      <label>長さ <input type="text" id="bMin" placeholder="0.5 / 8分"> ～ <input type="text" id="bMax"></label>
       <label>音量 <input type="number" id="vMin"> ～ <input type="number" id="vMax"></label>
     </div>
     <div class="row">
@@ -106,13 +139,14 @@
         <option value="vol-mul">音量を倍率で変更 (%)</option>
         <option value="note-add">ノート番号を加算 (移調)</option>
         <option value="note-set">ノート番号を指定値にする</option>
-        <option value="frame-add">フレームをずらす (±)</option>
+        <option value="frame-add">時間をずらす (±)</option>
+        <option value="frame-quantize">時間をグリッドに揃える (クオンタイズ)</option>
         <option value="beats-set">長さを指定値にする (拍)</option>
         <option value="beats-mul">長さを倍率で変更 (%)</option>
         <option value="move">指定トラックへ移動 (トラック番号)</option>
         <option value="delete">削除</option>
       </select>
-      <input type="number" id="bulkVal" value="20" step="any">
+      <input type="text" id="bulkVal" value="20" style="width:100px"> <select id="lenPreset" onchange="applyPreset(this)" style="display:none"></select>
       <small id="bulkHint"></small>
       <button onclick="applyBulk()">実行</button>
     </div>
@@ -141,9 +175,120 @@
     const DRUM = { 1:"スネア", 2:"バスドラム", 3:"サイドスティック", 4:"クラッシュ", 5:"オープンハット", 6:"クローズハット", 7:"タンバリン", 8:"ハンドクラップ", 9:"クラベス", 10:"ウッドブロック", 11:"カウベル", 12:"トライアングル", 13:"ボンゴ", 14:"コンガ", 15:"カバサ", 16:"ギロ", 17:"ビブラスラップ", 18:"クイーカ" };
     const NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
     const instLabel = id => id === 0 ? "ドラム" : (INST[id] || "不明");
-    const noteLabel = (inst, n) => inst === 0 ? (DRUM[n] || "不明") : NOTE_NAMES[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1);
 
-    const PAGE = 200;
+    // ---------- 設定 ----------
+    const DEFAULTS = { lenFmt: "both", frameUnit: "frame", beatsPerBar: 4, noteFmt: "en", octBase: 4, pageSize: 200, sort: "frame",
+      confirmAll: false, volDelta: 20, speed: 1, metronome: false, follow: true, lane: 36, color: "track", grid: "bar" };
+    const NUMERIC_SETTINGS = ["beatsPerBar", "octBase", "pageSize", "volDelta", "speed", "lane"];
+    const SETTINGS_KEY = "combinedNotesEditorSettings";
+    let settings = { ...DEFAULTS };
+    try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
+    function saveSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) {} }
+
+    // 長さ(拍)と音符名の対応。1拍 = 4分音符
+    const LEN_BASES = [[4, "全音符"], [2, "2分音符"], [1, "4分音符"], [0.5, "8分音符"], [0.25, "16分音符"], [0.125, "32分音符"], [0.0625, "64分音符"]];
+    const LEN_TABLE = [];
+    LEN_BASES.forEach(([b, nm]) => LEN_TABLE.push([b, nm], [b * 1.5, "付点" + nm], [b * 2 / 3, nm + "3連"], [b * 1.75, "複付点" + nm]));
+    const LEN_PRESETS = [[4, "全音符"], [3, "付点2分音符"], [2, "2分音符"], [1.5, "付点4分音符"], [1, "4分音符"], [0.75, "付点8分音符"],
+      [0.5, "8分音符"], [0.375, "付点16分音符"], [0.25, "16分音符"], [0.125, "32分音符"], [0.67, "4分音符3連"], [0.33, "8分音符3連"]];
+    const LEN_BASE_MAP = { "全": 4, "2分": 2, "4分": 1, "8分": 0.5, "16分": 0.25, "32分": 0.125, "64分": 0.0625 };
+
+    function lenName(b) {
+      let best = null, bd = 0.006;   // 出力は小数第2位に丸められるため、その誤差分を許容
+      LEN_TABLE.forEach(([v, nm]) => { const d = Math.abs(v - b); if (d <= bd) { bd = d; best = nm; } });
+      return best;
+    }
+    function parseLen(str) {
+      const s = String(str).trim();
+      if (s === "") return null;
+      if (Number.isFinite(Number(s))) return Number(s);
+      const m = s.replace(/\s+/g, "").match(/^(複付点|付点)?(全|2分|4分|8分|16分|32分|64分)(?:音符|休符)?(3連符?)?$/);
+      if (!m) return null;
+      let v = LEN_BASE_MAP[m[2]];
+      if (m[1] === "付点") v *= 1.5; else if (m[1] === "複付点") v *= 1.75;
+      if (m[3]) v *= 2 / 3;
+      return v;
+    }
+
+    const frameUnitName = () => ({ frame: "フレーム", sec: "秒", bar: "小節:拍" })[settings.frameUnit];
+    function fmtFrame(f) {
+      const u = settings.frameUnit;
+      if (u === "frame") return String(f);
+      if (u === "sec") return (f / FPS).toFixed(2);
+      const beats = f / FRAMES_PER_BEAT, bpb = settings.beatsPerBar;
+      const bar = Math.floor(beats / bpb) + 1;
+      return `${bar}:${Number((beats - (bar - 1) * bpb + 1).toFixed(2))}`;
+    }
+    function parseFrame(str) {
+      const s = String(str).trim(), u = settings.frameUnit;
+      if (s === "") return null;
+      if (u === "frame") { const v = Number(s); return Number.isFinite(v) ? Math.round(v) : null; }
+      if (u === "sec") { const v = Number(s); return Number.isFinite(v) ? Math.round(v * FPS) : null; }
+      const m = s.match(/^(\d+)(?::(\d+(?:\.\d+)?))?$/);
+      if (!m) return null;
+      const beats = (Number(m[1]) - 1) * settings.beatsPerBar + ((m[2] === undefined ? 1 : Number(m[2])) - 1);
+      return Math.round(beats * FRAMES_PER_BEAT);
+    }
+
+    const JP_NAMES = ["ド", "ド#", "レ", "レ#", "ミ", "ファ", "ファ#", "ソ", "ソ#", "ラ", "ラ#", "シ"];
+    function noteLabel(inst, n) {
+      if (inst === 0) return DRUM[n] || "不明";
+      if (settings.noteFmt === "num") return "";
+      const names = settings.noteFmt === "jp" ? JP_NAMES : NOTE_NAMES;
+      return names[((n % 12) + 12) % 12] + (Math.floor(n / 12) - 1 - (4 - settings.octBase));
+    }
+
+    const SORTS = {
+      frame: (a, b) => a[1][1] - b[1][1] || a[0] - b[0],
+      track: (a, b) => a[0] - b[0] || a[1][1] - b[1][1],
+      noteAsc: (a, b) => a[1][0] - b[1][0] || a[1][1] - b[1][1],
+      noteDesc: (a, b) => b[1][0] - a[1][0] || a[1][1] - b[1][1],
+      volDesc: (a, b) => b[1][3] - a[1][3] || a[1][1] - b[1][1],
+      lenDesc: (a, b) => b[1][2] - a[1][2] || a[1][1] - b[1][1]
+    };
+
+    function syncSettingControls() {
+      document.querySelectorAll("[data-set]").forEach(el => {
+        const k = el.dataset.set;
+        if (el.type === "checkbox") el.checked = !!settings[k]; else el.value = settings[k];
+      });
+      $("allVol").value = settings.volDelta;
+    }
+    function bindSettings() {
+      document.querySelectorAll("[data-set]").forEach(el => {
+        const k = el.dataset.set;
+        el.addEventListener("change", () => {
+          if (el.type === "checkbox") settings[k] = el.checked;
+          else {
+            const v = NUMERIC_SETTINGS.includes(k) ? Number(el.value) : el.value;
+            if (typeof v === "number" && !Number.isFinite(v)) { el.value = settings[k]; return; }
+            settings[k] = v;
+          }
+          saveSettings();
+          onSettingChanged(k);
+        });
+      });
+    }
+    function syncLabels() { $("lblFrame").textContent = frameUnitName(); }
+    function onSettingChanged(k) {
+      if (k === "speed") { if (playing) startPlay(curPos()); return; }
+      if (k === "metronome") { if (playing) metIdx = Math.ceil(rawPos() / BEAT_SEC); return; }
+      if (k === "follow" || k === "confirmAll") return;
+      if (k === "lane" || k === "color" || k === "grid") { drawTimeline(); return; }
+      if (k === "volDelta") { $("allVol").value = settings.volDelta; refreshTracks(); return; }
+      syncLabels(); updateHint(); runSearch(false); drawTimeline();
+    }
+    function resetSettings() {
+      settings = { ...DEFAULTS };
+      saveSettings(); syncSettingControls();
+      if (playing) { pausePlay(); }
+      refreshTracks(); syncLabels(); updateHint(); runSearch(false); drawTimeline();
+      log("設定を初期値に戻しました");
+    }
+    function fillPresets() {
+      $("lenPreset").innerHTML = '<option value="">音符から選択</option>' + LEN_PRESETS.map(([v, nm]) => `<option value="${v}">${nm}</option>`).join("");
+    }
+    function applyPreset(el) { if (el.value !== "") $("bulkVal").value = el.value; el.value = ""; }
     let tracks = [];      // [{ inst, notes: [[note, frame, beats, volume], ...] }]
     let history = [];
     let matched = [];     // [[trackIndex, noteRef], ...]
@@ -254,7 +399,7 @@
         h += `<tr><td>${i + 1}</td>
           <td><input type="number" min="0" value="${t.inst}" onchange="setInst(${i}, this.value)"></td>
           <td>${instLabel(t.inst)}</td><td>${t.notes.length}</td><td>${mx}</td>
-          <td><input type="number" id="tv${i}" value="20" step="1"> <button onclick="trackVol(${i})">適用</button></td>
+          <td><input type="number" id="tv${i}" value="${settings.volDelta}" step="1"> <button onclick="trackVol(${i})">適用</button></td>
           <td><button onclick="moveTrack(${i}, -1)">↑</button> <button onclick="moveTrack(${i}, 1)">↓</button> <button onclick="delTrack(${i})">削除</button></td></tr>`;
       });
       $("trackTable").innerHTML = h + "</table>";
@@ -302,11 +447,13 @@
     // ---------- 検索 ----------
     function getFilter() {
       const num = id => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
+      const fnum = id => parseFrame($(id).value);
+      const lnum = id => { const v = parseLen($(id).value); return v === null ? null : Number(v.toFixed(2)); };
       return {
         track: $("fTrack").value,
         insts: $("fInst").value.split(/[,\s]+/).filter(s => s !== "").map(Number),
-        n: [num("nMin"), num("nMax")], f: [num("fMin"), num("fMax")],
-        b: [num("bMin"), num("bMax")], v: [num("vMin"), num("vMax")]
+        n: [num("nMin"), num("nMax")], f: [fnum("fMin"), fnum("fMax")],
+        b: [lnum("bMin"), lnum("bMax")], v: [num("vMin"), num("vMax")]
       };
     }
     const inRange = (x, [lo, hi]) => (lo === null || x >= lo) && (hi === null || x <= hi);
@@ -326,7 +473,7 @@
     function runSearch(resetPage) {
       if (resetPage) page = 0;
       matched = getMatches();
-      matched.sort((a, b) => a[1][1] - b[1][1] || a[0] - b[0]);
+      matched.sort(SORTS[settings.sort] || SORTS.frame);
       renderResults();
     }
 
@@ -337,29 +484,38 @@
     }
 
     function changePage(d) {
-      const maxPage = Math.max(0, Math.ceil(matched.length / PAGE) - 1);
+      const maxPage = Math.max(0, Math.ceil(matched.length / settings.pageSize) - 1);
       page = clamp(page + d, 0, maxPage);
       renderResults();
     }
 
     function renderResults() {
       const total = matched.length;
-      const maxPage = Math.max(0, Math.ceil(total / PAGE) - 1);
+      const maxPage = Math.max(0, Math.ceil(total / settings.pageSize) - 1);
       if (page > maxPage) page = maxPage;
-      const s = page * PAGE, e = Math.min(total, s + PAGE);
+      const s = page * settings.pageSize, e = Math.min(total, s + settings.pageSize);
       $("resultInfo").textContent = total === 0 ? "(一致なし)" : `一致 ${total} 件 / 表示 ${s + 1}–${e}`;
-      let h = "<table><tr><th>トラック</th><th>楽器</th><th>ノート</th><th>名称</th><th>フレーム</th><th>長さ(拍)</th><th>音量</th><th></th></tr>";
+      let h = `<table><tr><th>トラック</th><th>楽器</th><th>ノート</th><th>名称</th><th>${frameUnitName()}</th><th>長さ</th><th>音量</th><th></th></tr>`;
       for (let k = s; k < e; k++) {
         const [ti, n] = matched[k], inst = tracks[ti].inst;
         h += `<tr><td>${ti + 1}</td><td>${instLabel(inst)}</td>
           <td><input type="number" value="${n[0]}" onchange="editCell(${k}, 0, this)"></td>
           <td>${noteLabel(inst, n[0])}</td>
-          <td><input type="number" value="${n[1]}" onchange="editCell(${k}, 1, this)"></td>
-          <td><input type="number" step="0.01" value="${n[2]}" onchange="editCell(${k}, 2, this)"></td>
+          <td><input type="text" value="${fmtFrame(n[1])}" onchange="editCell(${k}, 1, this)"></td>
+          <td style="text-align:left"><input type="text" style="width:90px" value="${lenCellValue(n[2])}" onchange="editCell(${k}, 2, this)">${lenCellNote(n[2])}</td>
           <td><input type="number" value="${n[3]}" onchange="editCell(${k}, 3, this)"></td>
           <td><button onclick="delRow(${k})">削除</button></td></tr>`;
       }
       $("results").innerHTML = h + "</table>";
+    }
+
+    function lenCellValue(b) {
+      const nm = lenName(b);
+      return settings.lenFmt === "name" && nm ? nm : String(b);
+    }
+    function lenCellNote(b) {
+      const nm = lenName(b);
+      return settings.lenFmt === "both" && nm ? ` <small>${nm}</small>` : "";
     }
 
     function validateCell(col, v) {
@@ -371,7 +527,9 @@
     }
 
     function editCell(k, col, el) {
-      const v = validateCell(col, Number(el.value));
+      const raw = el.value;
+      let v = col === 1 ? parseFrame(raw) : col === 2 ? parseLen(raw) : (raw.trim() === "" ? null : Number(raw));
+      v = v === null ? null : validateCell(col, v);
       if (v === null) { log("入力値が範囲外のため変更しませんでした"); renderResults(); return; }
       snapshot();
       matched[k][1][col] = v;
@@ -388,24 +546,34 @@
     // ---------- 一括編集 ----------
     const HINTS = {
       "vol-add": "例: 20 (全音量+20、上限100)", "vol-set": "0–100", "vol-mul": "例: 120 (1.2倍)",
-      "note-add": "例: 12 (1オクターブ上)", "note-set": "0–127", "frame-add": "例: -30 (1秒早める)",
-      "beats-set": "例: 0.25", "beats-mul": "例: 50 (半分)", "move": "移動先のトラック番号 (#)", "delete": "値は不要"
+      "note-add": "例: 12 (1オクターブ上)", "note-set": "0–127", "frame-add": "",
+      "beats-set": "例: 0.25 / 付点4分 / 8分3連", "beats-mul": "例: 50 (半分)",
+      "frame-quantize": "グリッド幅 例: 0.5 / 8分 (近い位置へ揃える)",
+      "move": "移動先のトラック番号 (#)", "delete": "値は不要"
     };
-    function updateHint() { $("bulkHint").textContent = HINTS[$("bulkOp").value]; }
+    function updateHint() {
+      const op = $("bulkOp").value, u = settings.frameUnit;
+      const h = { ...HINTS };
+      h["frame-add"] = u === "frame" ? "フレーム単位 例: -30 (1秒早める)" : u === "sec" ? "秒単位 例: -1 (1秒早める)" : "拍単位 例: 1 (1拍遅らせる)";
+      $("bulkHint").textContent = h[op];
+      $("lenPreset").style.display = (op === "beats-set" || op === "frame-quantize") ? "" : "none";
+    }
 
     function applyBulk() {
-      const op = $("bulkOp").value, val = Number($("bulkVal").value);
+      const op = $("bulkOp").value, raw = $("bulkVal").value.trim();
+      const val = (op === "beats-set" || op === "frame-quantize") ? (parseLen(raw) ?? NaN) : (raw === "" ? NaN : Number(raw));
       const m = getMatches();
       if (m.length === 0) { log("対象ノートがありません"); return; }
       if (op !== "delete" && !Number.isFinite(val)) { alert("数値を入力してください"); return; }
       if ((op === "vol-set" && (val < 0 || val > 100)) || (op === "note-set" && (val < 0 || val > 127)) ||
-          ((op === "beats-set" || op === "beats-mul") && val <= 0)) { alert("値が範囲外です"); return; }
+          ((op === "beats-set" || op === "beats-mul") && val <= 0) || (op === "frame-quantize" && val * FRAMES_PER_BEAT < 1)) { alert("値が範囲外です"); return; }
       let target = -1;
       if (op === "move") {
         target = val - 1;
         if (!Number.isInteger(target) || target < 0 || target >= tracks.length) { alert("存在するトラック番号を指定してください"); return; }
       }
       if (op === "delete" && !confirm(`${m.length} 件のノートを削除します。よろしいですか？`)) return;
+      if (op !== "delete" && settings.confirmAll && !confirm(`${m.length} 件のノートに「${$("bulkOp").selectedOptions[0].textContent}」を実行します。よろしいですか？`)) return;
 
       snapshot();
       if (op === "delete" || op === "move") {
@@ -421,7 +589,11 @@
             case "vol-mul": n[3] = clamp(Math.round(n[3] * val / 100), 0, 100); break;
             case "note-add": n[0] = clamp(Math.round(n[0] + val), 0, 127); break;
             case "note-set": n[0] = Math.round(val); break;
-            case "frame-add": n[1] = Math.max(0, Math.round(n[1] + val)); break;
+            case "frame-add": {
+              const d = settings.frameUnit === "frame" ? val : settings.frameUnit === "sec" ? val * FPS : val * FRAMES_PER_BEAT;
+              n[1] = Math.max(0, Math.round(n[1] + d)); break;
+            }
+            case "frame-quantize": { const g = val * FRAMES_PER_BEAT; n[1] = Math.max(0, Math.round(Math.round(n[1] / g) * g)); break; }
             case "beats-set": n[2] = Math.max(0.01, Number(val.toFixed(2))); break;
             case "beats-mul": n[2] = Math.max(0.01, Number((n[2] * val / 100).toFixed(2))); break;
           }
@@ -432,11 +604,11 @@
     }
 
     // ---------- 再生 (Web Audio 簡易シンセ) ----------
-    const BPM = 150, FPS = 30, BEAT_SEC = 60 / BPM;   // 変換ツールと同じ換算 (1フレーム=1/30秒)
-    const LANE = 36, RULER = 20;
+    const BPM = 150, FPS = 30, BEAT_SEC = 60 / BPM, FRAMES_PER_BEAT = FPS * 60 / BPM;   // 変換ツールと同じ換算 (1フレーム=1/30秒)
+    let LANE = 36; const RULER = 20;
     let actx = null, master = null, trackGains = [], events = [], evIdx = 0;
     let playing = false, basePos = 0, ctxStart = 0, timer = null, raf = null;
-    let duration = 0, activeVoices = 0, noiseBuf = null, pxPerSec = 40, dragging = false;
+    let duration = 0, activeVoices = 0, noiseBuf = null, pxPerSec = 40, dragging = false, metIdx = 0;
 
     const SYNTH = {
       1: ["triangle", "p"], 2: ["sine", "p"], 3: ["square", "s"], 4: ["sawtooth", "p"], 5: ["sawtooth", "p"],
@@ -457,7 +629,7 @@
     const anySolo = () => tracks.some(t => t.solo);
     const isAudible = t => anySolo() ? !!t.solo : !t.mute;
     const ppsEff = () => Math.min(pxPerSec, 30000 / Math.max(duration, 1));
-    const rawPos = () => basePos + Math.max(0, actx.currentTime - ctxStart);
+    const rawPos = () => basePos + Math.max(0, actx.currentTime - ctxStart) * settings.speed;
     const curPos = () => playing ? Math.min(duration, rawPos()) : basePos;
     const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 
@@ -557,7 +729,7 @@
       const aud = tracks.map(isAudible);
       while (evIdx < events.length) {
         const e = events[evIdx];
-        const when = ctxStart + (e.t - basePos);
+        const when = ctxStart + (e.t - basePos) / settings.speed;
         if (when > horizon) break;
         evIdx++;
         if (when < now - 0.05 || !aud[e.ti] || activeVoices >= 96) continue;
@@ -565,8 +737,26 @@
         if (peak <= 0) continue;
         const at = Math.max(when, now);
         if (tracks[e.ti].inst === 0) playDrum(e.n, at, peak, trackGains[e.ti]);
-        else playTone(tracks[e.ti].inst, e.n, at, e.d, peak, trackGains[e.ti]);
+        else playTone(tracks[e.ti].inst, e.n, at, e.d / settings.speed, peak, trackGains[e.ti]);
       }
+      if (settings.metronome) {
+        for (;;) {
+          const when = ctxStart + (metIdx * BEAT_SEC - basePos) / settings.speed;
+          if (when > horizon) break;
+          const idx = metIdx++;
+          if (when < now - 0.05) continue;
+          clickAt(Math.max(when, now), idx % settings.beatsPerBar === 0);
+        }
+      }
+    }
+
+    function clickAt(when, accent) {
+      const o = actx.createOscillator(), g = actx.createGain();
+      o.frequency.value = accent ? 1600 : 1100;
+      g.gain.setValueAtTime(0.35, when);
+      g.gain.exponentialRampToValueAtTime(0.0001, when + 0.04);
+      o.connect(g); g.connect(master);
+      o.start(when); o.stop(when + 0.05);
     }
 
     function stopNodes() {
@@ -588,6 +778,7 @@
       buildEvents();
       basePos = clamp(from, 0, duration);
       evIdx = lowerBound(events, basePos);
+      metIdx = Math.ceil(basePos / BEAT_SEC - 1e-6);
       ctxStart = actx.currentTime + 0.05;
       activeVoices = 0;
       playing = true;
@@ -618,7 +809,7 @@
 
     function tick() {
       if (!playing) return;
-      if (rawPos() >= duration + 0.4) {
+      if (rawPos() >= duration + 0.4 * settings.speed) {
         if ($("loop").checked) { startPlay(0); return; }
         playing = false; stopNodes(); basePos = 0;
         $("playBtn").textContent = "再生";
@@ -633,11 +824,11 @@
       const p = curPos();
       $("seek").max = duration;
       if (!dragging) $("seek").value = p;
-      $("timeText").textContent = `${fmt(p)} / ${fmt(duration)}  (フレーム ${Math.round(p * FPS)})`;
+      $("timeText").textContent = `${fmt(p)} / ${fmt(duration)}  (${frameUnitName()} ${fmtFrame(Math.round(p * FPS))})`;
       if (document.activeElement !== $("seekSec")) $("seekSec").value = p.toFixed(1);
       const x = p * ppsEff();
       $("playhead").style.left = x + "px";
-      if (playing) {
+      if (playing && settings.follow) {
         const w = $("tlScroll");
         if (x < w.scrollLeft || x > w.scrollLeft + w.clientWidth - 40) w.scrollLeft = Math.max(0, x - 40);
       }
@@ -651,17 +842,17 @@
     function clearMix() { tracks.forEach(t => { t.mute = false; t.solo = false; }); afterMixChange(); }
 
     function drawTimeline() {
+      LANE = settings.lane;
       duration = calcDuration();
       const pps = ppsEff();
-      const W = Math.max(300, Math.ceil(duration * pps) + 40);
-      const H = RULER + Math.max(1, tracks.length) * LANE;
+      const W = Math.max(300, Math.ceil(duration * pps) + 40), H = RULER + Math.max(1, tracks.length) * LANE;
       const cv = $("tl");
       cv.width = W; cv.height = H;
       cv.style.width = W + "px"; cv.style.height = H + "px";
       const c = cv.getContext("2d");
       c.clearRect(0, 0, W, H);
       c.fillStyle = "#f7f7f7"; c.fillRect(0, 0, W, RULER);
-      c.fillStyle = "#333"; c.font = "10px sans-serif";
+      c.font = "10px sans-serif";
       const step = pps >= 40 ? 1 : pps >= 15 ? 5 : 10;
       for (let s = 0; s <= duration + step; s += step) {
         const x = Math.round(s * pps) + 0.5;
@@ -672,11 +863,26 @@
         const y0 = RULER + ti * LANE;
         c.fillStyle = ti % 2 ? "#f4f8fb" : "#fff"; c.fillRect(0, y0, W, LANE);
         c.fillStyle = "#ddd"; c.fillRect(0, y0 + LANE - 1, W, 1);
+      });
+      if (settings.grid !== "none") {
+        const bpb = settings.beatsPerBar, beatPx = BEAT_SEC * pps;
+        for (let b = 0; b * BEAT_SEC <= duration + 1; b++) {
+          const isBar = b % bpb === 0;
+          if (!isBar && (settings.grid === "bar" || beatPx < 5)) continue;
+          c.fillStyle = isBar ? "#c4c4c4" : "#e4e4e4";
+          c.fillRect(Math.round(b * beatPx), RULER, 1, H - RULER);
+        }
+      }
+      tracks.forEach((t, ti) => {
+        const y0 = RULER + ti * LANE, aud = isAudible(t), hue = (ti * 47) % 360;
         let lo = 127, hi = 0;
         t.notes.forEach(n => { if (n[0] < lo) lo = n[0]; if (n[0] > hi) hi = n[0]; });
         const span = Math.max(1, hi - lo), h = LANE - 10;
-        c.fillStyle = isAudible(t) ? `hsl(${(ti * 47) % 360},70%,42%)` : "#bbb";
+        const styles = [];
+        for (let i = 0; i <= 20; i++) styles.push(`hsl(${hue},70%,${Math.round(80 - i * 5 * 0.45)}%)`);
+        c.fillStyle = !aud ? "#bbb" : `hsl(${hue},70%,42%)`;
         t.notes.forEach(n => {
+          if (aud && settings.color === "vol") c.fillStyle = styles[clamp(Math.round(n[3] / 5), 0, 20)];
           const x = n[1] / FPS * pps, w = Math.max(1, n[2] * BEAT_SEC * pps);
           const y = y0 + 4 + (1 - (n[0] - lo) / span) * h;
           c.fillRect(x, y, w, 3);
@@ -709,7 +915,7 @@
       runSearch(!keepPage);
       drawTimeline();
     }
-    updateHint();
+    syncSettingControls(); bindSettings(); fillPresets(); syncLabels(); updateHint();
   </script>
 </body>
 </html>
