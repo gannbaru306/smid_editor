@@ -36,7 +36,7 @@
   </style>
 </head>
 <body>
-  <h2>combined_notes エディタ v1.2</h2>
+  <h2>combined_notes エディタ v1.3</h2>
   <p>MIDI変換ツールが出力した <code>combined_notes_*.txt</code> を読み込み、検索・編集して再出力します。区切りの「/」は出力時に自動で付与されるため、編集操作で削除されることはありません。</p>
 
   <div id="drop-zone">ここをクリックするか、combined_notes_*.txt をドラッグしてください</div>
@@ -62,7 +62,16 @@
     <div class="row"><b>再生</b>
       <label>速度 <select data-set="speed"><option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1">1x</option><option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option></select></label>
       <label><input type="checkbox" data-set="metronome"> メトロノーム</label>
-      <label><input type="checkbox" data-set="follow"> 再生位置に追従してスクロール</label>
+      <label><input type="checkbox" data-set="follow"> タイムラインを再生位置に追従</label>
+      <label><input type="checkbox" data-set="followRows"> 検索結果も追従（フレーム順のとき）</label>
+      <label><input type="checkbox" data-set="highlight"> 鳴っているノートの行を楽器の色でハイライト</label>
+    </div>
+    <div class="row"><b>テンポ・拍</b>
+      <label>曲のBPM <input type="number" data-set="metBpm" step="0.01" min="20" max="300" style="width:80px"></label>
+      <button onclick="autoDetectTempo()">自動検出</button>
+      <button onclick="scaleBpm(2)">×2</button> <button onclick="scaleBpm(0.5)">÷2</button>
+      <label>拍位置のオフセット(秒) <input type="number" data-set="metOffset" step="0.001" style="width:80px"></label>
+      <button onclick="setDownbeatHere()">現在位置を小節の頭にする</button>
     </div>
     <div class="row"><b>タイムライン</b>
       <label>レーン高さ <select data-set="lane"><option value="28">小</option><option value="36">標準</option><option value="56">大</option><option value="80">特大</option></select></label>
@@ -70,7 +79,7 @@
       <label>罫線 <select data-set="grid"><option value="none">なし</option><option value="bar">小節</option><option value="beat">拍</option></select></label>
     </div>
     <div class="row"><button onclick="resetSettings()">設定を初期値に戻す</button>
-      <small>1拍 = 4分音符です（変換ツールの設定: 150BPM、30フレーム=1秒、1拍=12フレーム）。長さや時間の入力欄には「付点4分」「8分3連」「3:2」のような表記も入力できます。</small></div>
+      <small>長さの音符名は Scratch の拍（1拍=4分音符、変換ツールは150BPM換算）での表記です。「小節:拍」・罫線・クオンタイズ・メトロノームは「曲のBPM」基準で、ファイル読み込み時に自動検出します（途中でテンポが変わる曲ではズレます。その場合は手動で調整してください）。入力欄には「付点4分」「8分3連」「3:2」のような表記も使えます。</small></div>
   </details>
 
   <div class="group">
@@ -178,8 +187,9 @@
 
     // ---------- 設定 ----------
     const DEFAULTS = { lenFmt: "both", frameUnit: "frame", beatsPerBar: 4, noteFmt: "en", octBase: 4, pageSize: 200, sort: "frame",
-      confirmAll: false, volDelta: 20, speed: 1, metronome: false, follow: true, lane: 36, color: "track", grid: "bar" };
-    const NUMERIC_SETTINGS = ["beatsPerBar", "octBase", "pageSize", "volDelta", "speed", "lane"];
+      confirmAll: false, volDelta: 20, speed: 1, metronome: false, follow: true, followRows: true, highlight: true,
+      metBpm: 120, metOffset: 0, lane: 36, color: "track", grid: "bar" };
+    const NUMERIC_SETTINGS = ["beatsPerBar", "octBase", "pageSize", "volDelta", "speed", "lane", "metBpm", "metOffset"];
     const SETTINGS_KEY = "combinedNotesEditorSettings";
     let settings = { ...DEFAULTS };
     try { Object.assign(settings, JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}")); } catch (e) {}
@@ -210,12 +220,19 @@
       return v;
     }
 
+    // 楽器ごとの色（タイムラインのレーン・ノート・検索結果のハイライトで共通）
+    const instHue = inst => (inst * 137.508) % 360;
+    const instColor = (inst, l = 42, a = 1) => `hsla(${instHue(inst)},70%,${l}%,${a})`;
+    // 曲のテンポ基準の1拍あたりフレーム数 (Scratchの拍とは別)
+    const songBeatFrames = () => FPS * 60 / settings.metBpm;
+    let rowEls = [], rowStart = 0, hlState = [];
+
     const frameUnitName = () => ({ frame: "フレーム", sec: "秒", bar: "小節:拍" })[settings.frameUnit];
     function fmtFrame(f) {
       const u = settings.frameUnit;
       if (u === "frame") return String(f);
       if (u === "sec") return (f / FPS).toFixed(2);
-      const beats = f / FRAMES_PER_BEAT, bpb = settings.beatsPerBar;
+      const beats = (f - settings.metOffset * FPS) / songBeatFrames(), bpb = settings.beatsPerBar;
       const bar = Math.floor(beats / bpb) + 1;
       return `${bar}:${Number((beats - (bar - 1) * bpb + 1).toFixed(2))}`;
     }
@@ -227,7 +244,7 @@
       const m = s.match(/^(\d+)(?::(\d+(?:\.\d+)?))?$/);
       if (!m) return null;
       const beats = (Number(m[1]) - 1) * settings.beatsPerBar + ((m[2] === undefined ? 1 : Number(m[2])) - 1);
-      return Math.round(beats * FRAMES_PER_BEAT);
+      return Math.round(beats * songBeatFrames() + settings.metOffset * FPS);
     }
 
     const JP_NAMES = ["ド", "ド#", "レ", "レ#", "ミ", "ファ", "ファ#", "ソ", "ソ#", "ラ", "ラ#", "シ"];
@@ -260,8 +277,9 @@
         el.addEventListener("change", () => {
           if (el.type === "checkbox") settings[k] = el.checked;
           else {
-            const v = NUMERIC_SETTINGS.includes(k) ? Number(el.value) : el.value;
+            let v = NUMERIC_SETTINGS.includes(k) ? Number(el.value) : el.value;
             if (typeof v === "number" && !Number.isFinite(v)) { el.value = settings[k]; return; }
+            if (k === "metBpm") { v = clamp(v, 20, 300); el.value = v; }
             settings[k] = v;
           }
           saveSettings();
@@ -272,8 +290,10 @@
     function syncLabels() { $("lblFrame").textContent = frameUnitName(); }
     function onSettingChanged(k) {
       if (k === "speed") { if (playing) startPlay(curPos()); return; }
-      if (k === "metronome") { if (playing) metIdx = Math.ceil(rawPos() / BEAT_SEC); return; }
-      if (k === "follow" || k === "confirmAll") return;
+      if (k === "metronome") { if (playing) resyncMet(); return; }
+      if (k === "follow" || k === "followRows" || k === "highlight") { updateHighlight(); return; }
+      if (k === "confirmAll") return;
+      if (k === "metBpm" || k === "metOffset") { if (playing) resyncMet(); }
       if (k === "lane" || k === "color" || k === "grid") { drawTimeline(); return; }
       if (k === "volDelta") { $("allVol").value = settings.volDelta; refreshTracks(); return; }
       syncLabels(); updateHint(); runSearch(false); drawTimeline();
@@ -285,6 +305,70 @@
       refreshTracks(); syncLabels(); updateHint(); runSearch(false); drawTimeline();
       log("設定を初期値に戻しました");
     }
+    // ---------- テンポ検出 ----------
+    // ノート開始時刻の周期性(位相の揃い具合)から、曲のBPMと拍の位相を推定する
+    function detectTempo() {
+      const m = new Map();
+      tracks.forEach(t => t.notes.forEach(n => m.set(n[1], (m.get(n[1]) || 0) + n[3] / 100)));
+      if (m.size < 8) return null;
+      let times = [], ws = [];
+      m.forEach((w, f) => { times.push(f / FPS); ws.push(w); });
+      if (times.length > 6000) {
+        const st = Math.ceil(times.length / 6000);
+        times = times.filter((_, i) => i % st === 0); ws = ws.filter((_, i) => i % st === 0);
+      }
+      const sw = ws.reduce((a, b) => a + b, 0);
+      const score = bpm => {
+        const T = 60 / bpm; let re = 0, im = 0;
+        for (let i = 0; i < times.length; i++) { const a = 2 * Math.PI * times[i] / T; re += ws[i] * Math.cos(a); im += ws[i] * Math.sin(a); }
+        return [Math.hypot(re, im) / sw, Math.atan2(im, re)];
+      };
+      const prior = bpm => Math.exp(-0.5 * Math.pow(Math.log2(bpm / 105) / 0.5, 2));   // 一般的なテンポ帯を優先 (倍/半分テンポの誤検出対策)
+      let best = null;
+      for (let b = 50; b <= 220; b += 0.25) { const sc = score(b)[0] * prior(b); if (!best || sc > best.sc) best = { b, sc }; }
+      let fine = best;
+      for (let b = best.b - 0.4; b <= best.b + 0.4; b += 0.01) { const sc = score(b)[0] * prior(b); if (sc > fine.sc) fine = { b, sc }; }
+      const [R, ph] = score(fine.b), T = 60 / fine.b;
+      return { bpm: Number(fine.b.toFixed(2)), offset: Number((((ph / (2 * Math.PI) * T) % T + T) % T).toFixed(3)), conf: R };
+    }
+    function applyTempo(bpm, off) {
+      settings.metBpm = clamp(bpm, 20, 300); settings.metOffset = off;
+      saveSettings(); syncSettingControls(); onSettingChanged("metBpm");
+    }
+    function autoDetectTempo() {
+      const r = detectTempo();
+      if (!r) { log("テンポを検出できませんでした（ノートが少なすぎます）"); return; }
+      applyTempo(r.bpm, r.offset);
+      log(`テンポを検出しました: BPM ${r.bpm} / 拍位置オフセット ${r.offset}秒 (周期の一致度 ${(r.conf * 100).toFixed(0)}%)。倍・半分に検出された場合は ×2 / ÷2 で調整してください`);
+    }
+    function scaleBpm(f) { applyTempo(settings.metBpm * f, settings.metOffset); }
+    function setDownbeatHere() {
+      const bar = 60 / settings.metBpm * settings.beatsPerBar, p = curPos();
+      settings.metOffset = Number((((p % bar) + bar) % bar).toFixed(3));
+      saveSettings(); syncSettingControls(); onSettingChanged("metOffset");
+      log(`現在位置 (${p.toFixed(2)}秒) を小節の頭として拍位置を設定しました`);
+    }
+
+    // ---------- 再生中のハイライト ----------
+    function collectRows() {
+      rowEls = [...$("results").querySelectorAll("tr[data-k]")];
+      rowStart = page * settings.pageSize;
+      hlState = new Array(rowEls.length).fill(false);
+    }
+    function updateHighlight() {
+      if (!rowEls.length) return;
+      const on = playing && settings.highlight, pos = on ? curPos() : 0;
+      const aud = on ? tracks.map(isAudible) : [];
+      for (let i = 0; i < rowEls.length; i++) {
+        const item = matched[rowStart + i];
+        if (!item) continue;
+        const [ti, n] = item;
+        let hit = false;
+        if (on && aud[ti]) { const st = n[1] / FPS; hit = pos >= st && pos < st + Math.max(n[2] * BEAT_SEC, 0.12); }
+        if (hit !== hlState[i]) { hlState[i] = hit; rowEls[i].style.background = hit ? instColor(tracks[ti].inst, 55, 0.45) : ""; }
+      }
+    }
+
     function fillPresets() {
       $("lenPreset").innerHTML = '<option value="">音符から選択</option>' + LEN_PRESETS.map(([v, nm]) => `<option value="${v}">${nm}</option>`).join("");
     }
@@ -312,6 +396,11 @@
         tracks = parsed; history = []; $("undoBtn").disabled = true; if (playing) pausePlay(); basePos = 0;
         log(`読み込み完了: ${file.name} (トラック ${tracks.length}, ノート ${tracks.reduce((s, t) => s + t.notes.length, 0)})`);
         if (warn > 0) log(`形式が不正な行を ${warn} 行スキップしました`);
+        const tempo = detectTempo();
+        if (tempo) {
+          settings.metBpm = tempo.bpm; settings.metOffset = tempo.offset; saveSettings(); syncSettingControls();
+          log(`テンポを自動検出: BPM ${tempo.bpm} / 拍位置オフセット ${tempo.offset}秒（設定の「テンポ・拍」で調整できます）`);
+        }
         refreshAll(false);
       } catch (err) {
         log(`【エラー】${err.message}`);
@@ -498,7 +587,7 @@
       let h = `<table><tr><th>トラック</th><th>楽器</th><th>ノート</th><th>名称</th><th>${frameUnitName()}</th><th>長さ</th><th>音量</th><th></th></tr>`;
       for (let k = s; k < e; k++) {
         const [ti, n] = matched[k], inst = tracks[ti].inst;
-        h += `<tr><td>${ti + 1}</td><td>${instLabel(inst)}</td>
+        h += `<tr data-k="${k}"><td>${ti + 1}</td><td>${instLabel(inst)}</td>
           <td><input type="number" value="${n[0]}" onchange="editCell(${k}, 0, this)"></td>
           <td>${noteLabel(inst, n[0])}</td>
           <td><input type="text" value="${fmtFrame(n[1])}" onchange="editCell(${k}, 1, this)"></td>
@@ -507,6 +596,7 @@
           <td><button onclick="delRow(${k})">削除</button></td></tr>`;
       }
       $("results").innerHTML = h + "</table>";
+      collectRows();
     }
 
     function lenCellValue(b) {
@@ -548,13 +638,13 @@
       "vol-add": "例: 20 (全音量+20、上限100)", "vol-set": "0–100", "vol-mul": "例: 120 (1.2倍)",
       "note-add": "例: 12 (1オクターブ上)", "note-set": "0–127", "frame-add": "",
       "beats-set": "例: 0.25 / 付点4分 / 8分3連", "beats-mul": "例: 50 (半分)",
-      "frame-quantize": "グリッド幅 例: 0.5 / 8分 (近い位置へ揃える)",
+      "frame-quantize": "グリッド幅 例: 8分 / 0.5 (曲のBPM基準で近い位置へ揃える)",
       "move": "移動先のトラック番号 (#)", "delete": "値は不要"
     };
     function updateHint() {
       const op = $("bulkOp").value, u = settings.frameUnit;
       const h = { ...HINTS };
-      h["frame-add"] = u === "frame" ? "フレーム単位 例: -30 (1秒早める)" : u === "sec" ? "秒単位 例: -1 (1秒早める)" : "拍単位 例: 1 (1拍遅らせる)";
+      h["frame-add"] = u === "frame" ? "フレーム単位 例: -30 (1秒早める)" : u === "sec" ? "秒単位 例: -1 (1秒早める)" : "拍単位 例: 1 (曲のBPM基準で1拍遅らせる)";
       $("bulkHint").textContent = h[op];
       $("lenPreset").style.display = (op === "beats-set" || op === "frame-quantize") ? "" : "none";
     }
@@ -566,7 +656,7 @@
       if (m.length === 0) { log("対象ノートがありません"); return; }
       if (op !== "delete" && !Number.isFinite(val)) { alert("数値を入力してください"); return; }
       if ((op === "vol-set" && (val < 0 || val > 100)) || (op === "note-set" && (val < 0 || val > 127)) ||
-          ((op === "beats-set" || op === "beats-mul") && val <= 0) || (op === "frame-quantize" && val * FRAMES_PER_BEAT < 1)) { alert("値が範囲外です"); return; }
+          ((op === "beats-set" || op === "beats-mul") && val <= 0) || (op === "frame-quantize" && val * songBeatFrames() < 1)) { alert("値が範囲外です"); return; }
       let target = -1;
       if (op === "move") {
         target = val - 1;
@@ -590,10 +680,10 @@
             case "note-add": n[0] = clamp(Math.round(n[0] + val), 0, 127); break;
             case "note-set": n[0] = Math.round(val); break;
             case "frame-add": {
-              const d = settings.frameUnit === "frame" ? val : settings.frameUnit === "sec" ? val * FPS : val * FRAMES_PER_BEAT;
+              const d = settings.frameUnit === "frame" ? val : settings.frameUnit === "sec" ? val * FPS : val * songBeatFrames();
               n[1] = Math.max(0, Math.round(n[1] + d)); break;
             }
-            case "frame-quantize": { const g = val * FRAMES_PER_BEAT; n[1] = Math.max(0, Math.round(Math.round(n[1] / g) * g)); break; }
+            case "frame-quantize": { const g = val * songBeatFrames(), o = settings.metOffset * FPS; n[1] = Math.max(0, Math.round(o + Math.round((n[1] - o) / g) * g)); break; }
             case "beats-set": n[2] = Math.max(0.01, Number(val.toFixed(2))); break;
             case "beats-mul": n[2] = Math.max(0.01, Number((n[2] * val / 100).toFixed(2))); break;
           }
@@ -630,7 +720,12 @@
     const isAudible = t => anySolo() ? !!t.solo : !t.mute;
     const ppsEff = () => Math.min(pxPerSec, 30000 / Math.max(duration, 1));
     const rawPos = () => basePos + Math.max(0, actx.currentTime - ctxStart) * settings.speed;
-    const curPos = () => playing ? Math.min(duration, rawPos()) : basePos;
+    const outLatency = () => (actx && (actx.outputLatency || actx.baseLatency)) || 0;   // 実際に聞こえる位置に合わせて表示を補正
+    const curPos = () => playing ? clamp(rawPos() - outLatency() * settings.speed, basePos, duration) : basePos;
+    function resyncMet(pos) {
+      const per = 60 / settings.metBpm;
+      metIdx = Math.ceil(((pos === undefined ? rawPos() : pos) - settings.metOffset) / per - 1e-6);
+    }
     const fmt = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, "0")}`;
 
     function calcDuration() {
@@ -725,27 +820,38 @@
     }
 
     function schedule() {
-      const now = actx.currentTime, horizon = now + 0.25;
+      if (!playing) return;
+      const spd = settings.speed;
+      if (rawPos() >= duration + 0.4 * spd) {   // 終端判定はタイマー側で行う（非表示タブでは rAF が止まるため）
+        if ($("loop").checked) { startPlay(0); return; }
+        playing = false; stopNodes(); basePos = 0;
+        $("playBtn").textContent = "再生";
+        updateTransport();
+        return;
+      }
+      const now = actx.currentTime, hidden = document.hidden;
+      const horizon = now + (hidden ? 3 : 0.3), lateLimit = now - (hidden ? 0.3 : 0.05);   // 非表示時は先読みを長くする
       const aud = tracks.map(isAudible);
       while (evIdx < events.length) {
         const e = events[evIdx];
-        const when = ctxStart + (e.t - basePos) / settings.speed;
+        const when = ctxStart + (e.t - basePos) / spd;
         if (when > horizon) break;
         evIdx++;
-        if (when < now - 0.05 || !aud[e.ti] || activeVoices >= 96) continue;
+        if (when < lateLimit || !aud[e.ti] || activeVoices >= 400) continue;
         const peak = (e.v / 100) * 0.25;
         if (peak <= 0) continue;
         const at = Math.max(when, now);
         if (tracks[e.ti].inst === 0) playDrum(e.n, at, peak, trackGains[e.ti]);
-        else playTone(tracks[e.ti].inst, e.n, at, e.d / settings.speed, peak, trackGains[e.ti]);
+        else playTone(tracks[e.ti].inst, e.n, at, e.d / spd, peak, trackGains[e.ti]);
       }
       if (settings.metronome) {
+        const per = 60 / settings.metBpm, bpb = settings.beatsPerBar;
         for (;;) {
-          const when = ctxStart + (metIdx * BEAT_SEC - basePos) / settings.speed;
+          const when = ctxStart + (settings.metOffset + metIdx * per - basePos) / spd;
           if (when > horizon) break;
           const idx = metIdx++;
-          if (when < now - 0.05) continue;
-          clickAt(Math.max(when, now), idx % settings.beatsPerBar === 0);
+          if (when < lateLimit) continue;
+          clickAt(Math.max(when, now), ((idx % bpb) + bpb) % bpb === 0);
         }
       }
     }
@@ -759,8 +865,21 @@
       o.start(when); o.stop(when + 0.05);
     }
 
+    // 非表示タブでもスケジューラが止まらないよう、Worker のタイマーを使う（使えない環境では setInterval）
+    function makeTicker(fn, ms) {
+      try {
+        const url = URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms});`], { type: "text/javascript" }));
+        const wk = new Worker(url);
+        wk.onmessage = fn;
+        return { stop() { wk.terminate(); URL.revokeObjectURL(url); } };
+      } catch (e) {
+        const id = setInterval(fn, ms);
+        return { stop() { clearInterval(id); } };
+      }
+    }
+
     function stopNodes() {
-      clearInterval(timer); timer = null;
+      if (timer) { timer.stop(); timer = null; }
       cancelAnimationFrame(raf);
       if (master) { try { master.disconnect(); } catch (e) {} master = null; }
     }
@@ -778,11 +897,11 @@
       buildEvents();
       basePos = clamp(from, 0, duration);
       evIdx = lowerBound(events, basePos);
-      metIdx = Math.ceil(basePos / BEAT_SEC - 1e-6);
+      resyncMet(basePos);
       ctxStart = actx.currentTime + 0.05;
       activeVoices = 0;
       playing = true;
-      timer = setInterval(schedule, 40);
+      timer = makeTicker(schedule, 25);
       schedule();
       raf = requestAnimationFrame(tick);
       $("playBtn").textContent = "一時停止";
@@ -809,13 +928,6 @@
 
     function tick() {
       if (!playing) return;
-      if (rawPos() >= duration + 0.4 * settings.speed) {
-        if ($("loop").checked) { startPlay(0); return; }
-        playing = false; stopNodes(); basePos = 0;
-        $("playBtn").textContent = "再生";
-        updateTransport();
-        return;
-      }
       updateTransport();
       raf = requestAnimationFrame(tick);
     }
@@ -828,10 +940,20 @@
       if (document.activeElement !== $("seekSec")) $("seekSec").value = p.toFixed(1);
       const x = p * ppsEff();
       $("playhead").style.left = x + "px";
-      if (playing && settings.follow) {
+      if (playing && settings.follow) {   // 再生位置を左から30%の位置に固定し、毎フレーム連続でスクロール
         const w = $("tlScroll");
-        if (x < w.scrollLeft || x > w.scrollLeft + w.clientWidth - 40) w.scrollLeft = Math.max(0, x - 40);
+        w.scrollLeft = Math.max(0, x - w.clientWidth * 0.3);
       }
+      if (playing && settings.followRows && settings.sort === "frame" && matched.length) {
+        const f = Math.floor(p * FPS);
+        let lo = 0, hi = matched.length;
+        while (lo < hi) { const m = (lo + hi) >> 1; if (matched[m][1][1] < f) lo = m + 1; else hi = m; }
+        const idx = Math.min(lo, matched.length - 1), pg = Math.floor(idx / settings.pageSize);
+        if (pg !== page) { page = pg; renderResults(); }
+        const tr = rowEls[idx - page * settings.pageSize], wrap = $("results-wrap");
+        if (tr) wrap.scrollTop = Math.max(0, tr.offsetTop - wrap.clientHeight * 0.3);
+      }
+      updateHighlight();
     }
 
     function setMaster(v) { if (master) master.gain.value = Number(v); }
@@ -865,16 +987,16 @@
         c.fillStyle = "#ddd"; c.fillRect(0, y0 + LANE - 1, W, 1);
       });
       if (settings.grid !== "none") {
-        const bpb = settings.beatsPerBar, beatPx = BEAT_SEC * pps;
-        for (let b = 0; b * BEAT_SEC <= duration + 1; b++) {
-          const isBar = b % bpb === 0;
+        const bpb = settings.beatsPerBar, per = 60 / settings.metBpm, off = settings.metOffset, beatPx = per * pps;
+        for (let b = Math.ceil(-off / per); b * per + off <= duration + 1; b++) {
+          const isBar = ((b % bpb) + bpb) % bpb === 0;
           if (!isBar && (settings.grid === "bar" || beatPx < 5)) continue;
           c.fillStyle = isBar ? "#c4c4c4" : "#e4e4e4";
-          c.fillRect(Math.round(b * beatPx), RULER, 1, H - RULER);
+          c.fillRect(Math.round((b * per + off) * pps), RULER, 1, H - RULER);
         }
       }
       tracks.forEach((t, ti) => {
-        const y0 = RULER + ti * LANE, aud = isAudible(t), hue = (ti * 47) % 360;
+        const y0 = RULER + ti * LANE, aud = isAudible(t), hue = instHue(t.inst);
         let lo = 127, hi = 0;
         t.notes.forEach(n => { if (n[0] < lo) lo = n[0]; if (n[0] > hi) hi = n[0]; });
         const span = Math.max(1, hi - lo), h = LANE - 10;
@@ -889,7 +1011,7 @@
         });
       });
       $("laneLabels").innerHTML = `<div style="height:${RULER}px;border-bottom:1px solid #ddd"></div>` + tracks.map((t, i) =>
-        `<div class="lane" style="height:${LANE}px"><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${i + 1}: ${instLabel(t.inst)}</span>` +
+        `<div class="lane" style="height:${LANE}px"><i style="flex:none;width:9px;height:9px;background:${instColor(t.inst, 42)}"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis">${t.inst}: ${instLabel(t.inst)}</span>` +
         `<button class="${t.mute ? "on-m" : ""}" onclick="toggleMute(${i})">M</button>` +
         `<button class="${t.solo ? "on-s" : ""}" onclick="toggleSolo(${i})">S</button></div>`).join("");
       $("playhead").style.height = H + "px";
@@ -908,6 +1030,11 @@
     $("seek").addEventListener("change", e => { dragging = false; seek(Number(e.target.value)); });
     $("seekSec").addEventListener("change", e => seek(Number(e.target.value)));
     $("zoom").addEventListener("input", e => { pxPerSec = Number(e.target.value); drawTimeline(); });
+    // タブ切替から戻ったとき、コンテキストを再開して現在位置から再スケジュール
+    document.addEventListener("visibilitychange", () => {
+      if (!playing || !actx || document.hidden) return;
+      actx.resume().then(() => { if (playing) startPlay(curPos()); });
+    });
 
     function refreshAll(keepPage) {
       if (playing) pausePlay();   // データ編集時は再生を一時停止
