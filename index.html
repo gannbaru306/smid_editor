@@ -392,9 +392,9 @@
     async function loadFile(file) {
       try {
         const text = await file.text();
-        const { tracks: parsed, warn } = parseText(text);
+        const { tracks: parsed, warn, hasClones } = parseText(text);
         tracks = parsed; history = []; $("undoBtn").disabled = true; if (playing) pausePlay(); basePos = 0;
-        log(`読み込み完了: ${file.name} (トラック ${tracks.length}, ノート ${tracks.reduce((s, t) => s + t.notes.length, 0)})`);
+        log(`読み込み完了: ${file.name} (トラック ${tracks.length}, ノート ${tracks.reduce((s, t) => s + t.notes.length, 0)}, クローン数${hasClones ? "あり" : "なし"})`);
         if (warn > 0) log(`形式が不正な行を ${warn} 行スキップしました`);
         const tempo = detectTempo();
         if (tempo) {
@@ -423,6 +423,17 @@
       i++;
       const result = ids.map(inst => ({ inst, notes: [] }));
       let warn = 0;
+      // v6形式: 楽器IDの後にクローン数のセグメントがある (ID数と同じ個数の整数だけの行)。
+      // v2形式: そのセグメントがなく、ここからすぐ音符。両方読めるように先読みで判定する。
+      {
+        let j = i;
+        const seg = [];
+        while (j < lines.length && lines[j] !== "/") { if (lines[j] !== "") seg.push(lines[j]); j++; }
+        if (seg.length === ids.length && seg.every(s => /^\d+$/.test(s))) {
+          seg.forEach((s, t) => { result[t].clones = Number(s); });
+          i = j + 1;
+        }
+      }
       for (let t = 0; t < ids.length; t++) {
         while (i < lines.length && lines[i] !== "/") {
           if (lines[i] !== "") {
@@ -433,7 +444,7 @@
         }
         i++;
       }
-      return { tracks: result, warn };
+      return { tracks: result, warn, hasClones: result.length > 0 && result[0].clones !== undefined };
     }
 
     // ---------- 出力 ----------
@@ -441,6 +452,11 @@
       const lines = [];
       tracks.forEach(t => lines.push(String(t.inst)));
       lines.push("/");
+      // クローン数つきで読み込んだファイルは、書き出し時もクローン数を入れる (v2形式のままなら入れない)。
+      if (tracks.some(t => t.clones !== undefined)) {
+        tracks.forEach(t => lines.push(String(t.clones ?? 6)));
+        lines.push("/");
+      }
       tracks.forEach(t => {
         t.notes.map((n, i) => [n, i])
           .sort((a, b) => a[0][1] - b[0][1] || a[1] - b[1])
@@ -467,7 +483,7 @@
 
     // ---------- 履歴 ----------
     function snapshot() {
-      history.push(tracks.map(t => ({ inst: t.inst, mute: t.mute, solo: t.solo, notes: t.notes.map(n => n.slice()) })));
+      history.push(tracks.map(t => ({ inst: t.inst, mute: t.mute, solo: t.solo, clones: t.clones, notes: t.notes.map(n => n.slice()) })));
       if (history.length > 20) history.shift();
       $("undoBtn").disabled = false;
     }
