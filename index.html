@@ -402,6 +402,7 @@
           log(`テンポを自動検出: BPM ${tempo.bpm} / 拍位置オフセット ${tempo.offset}秒（設定の「テンポ・拍」で調整できます）`);
         }
         refreshAll(false);
+        preloadSamples();   // 押してから待たずに済むよう、ファイル読み込み時に音源も先読みしておく
       } catch (err) {
         log(`【エラー】${err.message}`);
       }
@@ -732,6 +733,89 @@
       17: ["n", 0.5, "bandpass", 2500], 18: ["t", 0.3, 400, 250]
     };
 
+    // ---------- Scratch音源 (サンプル) ----------
+    // Scratchの音楽拡張は録音サンプルを鳴らしている。鳴らしたい音以下で一番近いサンプルを選び、
+    // 半音差の分だけ再生速度を変える (playbackRate = 2^(半音差/12))。サンプルは scratch-vm の
+    // npm パッケージに含まれるものを jsDelivr から取る (リポジトリに音源ファイルは置かない)。
+    const SCRATCH_BASE = "https://cdn.jsdelivr.net/npm/scratch-vm@3.0.21/src/extensions/scratch3_music/assets/";
+    // 楽器ID: [フォルダ名, サンプルの音程一覧, リリース時間(秒)] (scratch-vm の INSTRUMENT_INFO と同じ)
+    const INST_SAMPLES = {
+      1: ["1-piano", [24, 36, 48, 60, 72, 84, 96, 108], 0.5],
+      2: ["2-electric-piano", [60], 0.5], 3: ["3-organ", [60], 0.5], 4: ["4-guitar", [60], 0.5],
+      5: ["5-electric-guitar", [60], 0.5], 6: ["6-bass", [36, 48], 0.25], 7: ["7-pizzicato", [60], 0.25],
+      8: ["8-cello", [36, 48, 60], 0.1], 9: ["9-trombone", [36, 48, 60], 0.01], 10: ["10-clarinet", [48, 60], 0.01],
+      11: ["11-saxophone", [36, 60, 84], 0.01], 12: ["12-flute", [60, 72], 0.01], 13: ["13-wooden-flute", [60, 72], 0.01],
+      14: ["14-bassoon", [36, 48, 60], 0.01], 15: ["15-choir", [48, 60, 72], 0.25], 16: ["16-vibraphone", [60, 72], 0.5],
+      17: ["17-music-box", [60], 0.25], 18: ["18-steel-drum", [60], 0.5], 19: ["19-marimba", [60], 0.01],
+      20: ["20-synth-lead", [60], 0.1], 21: ["21-synth-pad", [60], 0.25]
+    };
+    // ドラムID(1-18): ファイル名 (scratch-vm の DRUM_INFO と同じ順)
+    const DRUM_FILES = ["1-snare", "2-bass-drum", "3-side-stick", "4-crash-cymbal", "5-open-hi-hat", "6-closed-hi-hat",
+      "7-tambourine", "8-hand-clap", "9-claves", "10-wood-block", "11-cowbell", "12-triangle",
+      "13-bongo", "14-conga", "15-cabasa", "16-guiro", "17-vibraslap", "18-cuica"];
+    const sampleBufs = new Map();   // "楽器ID:サンプル音程" -> AudioBuffer (失敗時は null)
+    const drumBufs = new Map();     // ドラムID -> AudioBuffer (失敗時は null)
+    let sampleLoadPromise = null;
+
+    async function loadSample(url) {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) return null;
+        return await actx.decodeAudioData(await res.arrayBuffer());
+      } catch (e) { return null; }
+    }
+
+    // 今のファイルで使う楽器・ドラムのサンプルを読み込む (済みのものは再取得しない)。
+    // 返す Promise は読み込み中の共有分。失敗したサンプルは null として覚え、再生時はシンセにフォールバックする。
+    function preloadSamples() {
+      if (sampleLoadPromise) return sampleLoadPromise;
+      sampleLoadPromise = (async () => {
+        if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+        const jobs = [];
+        const insts = [...new Set(tracks.map(t => t.inst).filter(i => i !== 0))];
+        insts.forEach(inst => {
+          const info = INST_SAMPLES[inst];
+          if (!info) return;
+          info[1].forEach(sn => {
+            const key = inst + ":" + sn;
+            if (!sampleBufs.has(key)) jobs.push(loadSample(SCRATCH_BASE + "instruments/" + info[0] + "/" + sn + ".mp3").then(b => sampleBufs.set(key, b)));
+          });
+        });
+        if (tracks.some(t => t.inst === 0)) {
+          for (let d = 1; d <= 18; d++) {
+            if (!drumBufs.has(d)) jobs.push(loadSample(SCRATCH_BASE + "drums/" + DRUM_FILES[d - 1] + ".mp3").then(b => drumBufs.set(d, b)));
+          }
+        }
+        if (jobs.length > 0) {
+          await Promise.all(jobs);
+          const ok = [...sampleBufs.values()].some(Boolean) || [...drumBufs.values()].some(Boolean);
+          if (ok) log("Scratch音源を読み込みました（サンプル音で再生します）");
+          else log("Scratch音源の読み込みに失敗しました。シンセ音で再生します。");
+        }
+        sampleLoadPromise = null;
+      })();
+      return sampleLoadPromise;
+    }
+
+    // 鳴らしたい音以下で一番近いサンプルを選び、再生速度を返す。サンプルが未読込なら null。
+    function pickSample(inst, note) {
+      const info = INST_SAMPLES[inst];
+      if (!info) return null;
+      const samples = info[1];
+      let s = samples[0];
+      for (let i = samples.length - 1; i >= 0; i--) { if (note >= samples[i]) { s = samples[i]; break; } }
+      const buf = sampleBufs.get(inst + ":" + s);
+      if (!buf) return null;
+      return { buf, rate: Math.pow(2, (note - s) / 12) };
+    }
+
+    // 再生ボタンからの開始: サンプル読み込みを待ってから鳴らす (6秒でタイムアウトしてシンセで再生)。
+    async function playWithSamples(from) {
+      const timeout = new Promise(r => setTimeout(() => r(false), 6000));
+      await Promise.race([preloadSamples(), timeout]);
+      startPlay(from);
+    }
+
     const anySolo = () => tracks.some(t => t.solo);
     const isAudible = t => anySolo() ? !!t.solo : !t.mute;
     const ppsEff = () => Math.min(pxPerSec, 30000 / Math.max(duration, 1));
@@ -781,6 +865,25 @@
     }
 
     function playTone(inst, note, when, dur, peak, out) {
+      // Scratch音源 (サンプル) があればそれを使う。なければ下のシンセにフォールバック。
+      const smp = pickSample(inst, note);
+      if (smp) {
+        const src = actx.createBufferSource();
+        src.buffer = smp.buf;
+        src.playbackRate.value = smp.rate;
+        const g = actx.createGain();
+        const rel = (INST_SAMPLES[inst] && INST_SAMPLES[inst][2]) || 0.01;
+        const end = when + dur;
+        g.gain.setValueAtTime(0.0001, when);
+        g.gain.linearRampToValueAtTime(peak, when + 0.01);
+        g.gain.setValueAtTime(peak, end);
+        g.gain.linearRampToValueAtTime(0.0001, end + rel);
+        src.connect(g); g.connect(out);
+        src.start(when); src.stop(end + rel + 0.02);
+        activeVoices++;
+        src.onended = () => { activeVoices--; g.disconnect(); };
+        return;
+      }
       const [wave, mode, atk = 0.01] = SYNTH[inst] || ["triangle", "s"];
       const osc = actx.createOscillator();
       osc.type = wave;
@@ -811,6 +914,22 @@
     }
 
     function playDrum(id, when, peak, out) {
+      // Scratch音源 (サンプル) があればそれを使う。なければ下のシンセにフォールバック。
+      const buf = drumBufs.get(id);
+      if (buf) {
+        const src = actx.createBufferSource();
+        src.buffer = buf;
+        const g = actx.createGain();
+        const fade = Math.min(0.01, buf.duration / 2);
+        g.gain.setValueAtTime(peak * 1.5, when);
+        g.gain.setValueAtTime(peak * 1.5, when + buf.duration - fade);
+        g.gain.linearRampToValueAtTime(0.0001, when + buf.duration);
+        src.connect(g); g.connect(out);
+        src.start(when); src.stop(when + buf.duration + 0.02);
+        activeVoices++;
+        src.onended = () => { activeVoices--; g.disconnect(); };
+        return;
+      }
       const cfg = DRUMS[id] || DRUMS[3], d = cfg[1];
       const g = actx.createGain();
       g.gain.setValueAtTime(peak * 1.5, when);
@@ -932,7 +1051,7 @@
 
     function togglePlay() {
       if (playing) pausePlay();
-      else startPlay(basePos >= duration ? 0 : basePos);
+      else playWithSamples(basePos >= duration ? 0 : basePos);
     }
     function stopPlay() { pausePlay(); basePos = 0; updateTransport(); }
 
