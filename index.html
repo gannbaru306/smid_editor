@@ -874,8 +874,8 @@
         const g = actx.createGain();
         const rel = (INST_SAMPLES[inst] && INST_SAMPLES[inst][2]) || 0.01;
         const end = when + dur;
-        g.gain.setValueAtTime(0.0001, when);
-        g.gain.linearRampToValueAtTime(peak, when + 0.01);
+        // Scratchと同じくアタックなしで即フル音量 (0.01秒のフェードインがあるとギターのピックの食いつきが鈍る)。
+        g.gain.setValueAtTime(peak, when);
         g.gain.setValueAtTime(peak, end);
         g.gain.linearRampToValueAtTime(0.0001, end + rel);
         src.connect(g); g.connect(out);
